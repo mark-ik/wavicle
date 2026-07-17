@@ -16,11 +16,16 @@ the conformance oracle), read from copies kept outside this repo.
 | `float` | `unpack_floats.c` float_values + float_values_nowvx, f32 accessor macros in `wavpack_local.h`, `open_utils.c` read_float_info + the wvx new-format float prefix | M3; decode only |
 | `decode` driver | `unpack.c` unpack_samples (shape, joint stereo, CRC, fixup lossless path incl. INT32_DATA and FLOAT_DATA), `open_utils.c` init_wvx_bitstream + read_int32_info | M1+M2+M3; hard-errors where the reference mutes |
 
+| `bitstream` (writer) | `wavpack_local.h` putbit/putbits macros, `pack.c` bs_close_write | M4 |
+| `entropy` (encoder) | `write_words.c` send_words_lossless + flush_word, `write_words.c` write_entropy_vars | M4; lossless path only |
+| `decorr` (forward) | `pack.c` decorr_mono_buffer + decorr_stereo_pass (forward), inverse of the decode passes | M4; positive terms only |
+| `encode` driver | `pack.c` pack_samples (block assembly order, CRC over originals, metadata framing) | M4; single block, fixed one-term config |
+
 Planned lineage for later milestones:
 
 | Module | Reference lineage |
 |---|---|
-| `encode` driver + halves | `pack.c`, `write_words.c`, `pack_floats.c` (fixed decorr config, ours) |
+| `encode` float | `pack_floats.c` (float encode, wvx residual) |
 
 Deliberately NOT ported: `decorr_tables.h` (the encoder ships one fixed
 decorrelation configuration instead of the reference's table-driven search),

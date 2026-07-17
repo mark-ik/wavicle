@@ -464,4 +464,29 @@ that step:
   media-identity invariant Hocket keys on, proven end to end. wasm and
   no-default-features clean. The full decoder is now complete for the tiny
   profile: 16/24/32-bit int and 32-bit float, mono/stereo, all lossless.
-  Next: M4, the encoder (fixed decorrelation config, integer first).
+- 2026-07-15: **M4 LANDED — the integer encoder. wavicle now writes .wv the
+  reference decodes losslessly.** Ported the encode half from the 5.9.0
+  reference: the `BitWriter` (putbit/putbits + the pad-to-even bs_close_write),
+  the median entropy encoder (`send_words_lossless` + `flush_word`, the exact
+  mirror of the decoder including the zero-run and LIMIT_ONES escape encodings),
+  and the forward decorrelation passes (`decorr_mono_buffer` /
+  `decorr_stereo_pass`, the exact inverse of the decode passes). The driver
+  assembles a single block in the reference's metadata order (decorr terms/
+  weights/samples, entropy vars, wv bitstream), computes the block CRC over the
+  original samples, and stamps version 0x410. Two decisions from the plan held:
+  the encoder ships ONE fixed decorrelation term (no adaptive search, no
+  decorr_tables.h), and the gate is round-trip through the reference, not
+  byte-identity. Gate green: seven generated buffers (16-bit mono/stereo/
+  silence/full-scale, 24-bit stereo, 32-bit mono, 16-bit ramp) each round-trip
+  losslessly through BOTH our own decoder AND the reference `wvunpack -r`.
+  Feature split proven: default `decode`, `--features encode` adds the writer,
+  and encode-only, decode-only, wasm, and combined builds all compile. Two
+  lessons recorded: (1) the entropy coder needs small residuals, so zero
+  decorrelation is not viable (a full-magnitude first residual emits ~2^N unary
+  bits and overflows the u32 medians) which is exactly why decorrelation exists;
+  (2) the magnitude header field must be the actual data magnitude, not the
+  nominal bit depth, or a 32-bit stream's mute limit overflows and the reference
+  rejects it. Made the median updates wrapping to match the reference's uint32_t
+  exactly. Default features stay `decode` until the encoder is complete (float
+  at M5). Next: M5, float encode (`pack_floats.c`: the scan/align + wvx
+  residual), the last milestone before Hocket integration.

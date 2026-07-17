@@ -9,15 +9,15 @@
 //! wasm-capable. Out of scope: DSD, hybrid/lossy modes, correction files,
 //! more than two channels, pre-4.0 legacy streams.
 //!
-//! **Status: M3 (lossless decoder complete).** Bit-exact lossless decode of
-//! 16/24/32-bit integer and 32-bit float, mono and stereo (joint stereo,
-//! false stereo, zero-run silence, multiblock, the wvx extension for >24-bit
-//! integers and float). Verified sample-for-sample against the reference
-//! wvunpack -r, with all CRCs enforced as hard errors; float decode also
-//! passes a BLAKE3 round-trip identity check over the decoded f32 bytes.
-//! Block parsing and scope gates landed at M0. The encoder (M4+) is not yet
-//! implemented. The founding plan, milestone ladder, and conformance-oracle
-//! method live in the repository's `design_docs/`.
+//! **Status: M4 (lossless decoder complete; integer encoder landed).** The
+//! decoder handles 16/24/32-bit integer and 32-bit float, mono and stereo,
+//! bit-exact against the reference `wvunpack -r` (float also passes a BLAKE3
+//! identity check). The encoder ([`encode_int`], behind the `encode` feature)
+//! writes 8/16/24/32-bit integer single-block streams that the reference
+//! `wvunpack` decodes losslessly, with a fixed single-term decorrelation.
+//! Float encode (M5) and multi-block/decorrelation-tuning are the remaining
+//! work. The founding plan and conformance-oracle method live in the
+//! repository's `design_docs/`.
 
 #![forbid(unsafe_code)]
 
@@ -26,18 +26,26 @@ pub mod error;
 pub mod format;
 pub mod metadata;
 
-#[cfg(feature = "decode")]
+// Shared between the two directions (bit I/O, the median model, sample tables).
+#[cfg(any(feature = "decode", feature = "encode"))]
 pub mod bitstream;
+#[cfg(any(feature = "decode", feature = "encode"))]
+pub mod entropy;
+
+#[cfg(any(feature = "decode", feature = "encode"))]
+pub mod decorr;
+
 #[cfg(feature = "decode")]
 pub mod decode;
 #[cfg(feature = "decode")]
-pub mod decorr;
-#[cfg(feature = "decode")]
-pub mod entropy;
-#[cfg(feature = "decode")]
 pub mod float;
 
+#[cfg(feature = "encode")]
+pub mod encode;
+
 pub use block::{Block, BlockHeader, Blocks, StreamInfo};
+pub use error::{Error, Scope};
 #[cfg(feature = "decode")]
 pub use decode::{DecodedStream, decode_stream};
-pub use error::{Error, Scope};
+#[cfg(feature = "encode")]
+pub use encode::{EncodeParams, encode_int};

@@ -31,27 +31,38 @@ impl Medians {
         (self.median[i] >> 4) + 1
     }
 
+    // The reference medians are uint32_t; these updates wrap on overflow the
+    // same way. Overflow does not arise for real (decorrelated) residuals, but
+    // matching C's wrapping keeps encoder and decoder state bit-identical in
+    // every case rather than panicking in a debug build.
     fn inc0(&mut self) {
-        self.median[0] += ((self.median[0] + DIV0) / DIV0) * 5;
+        let d = ((self.median[0] + DIV0) / DIV0).wrapping_mul(5);
+        self.median[0] = self.median[0].wrapping_add(d);
     }
     fn dec0(&mut self) {
-        self.median[0] -= ((self.median[0] + (DIV0 - 2)) / DIV0) * 2;
+        let d = ((self.median[0] + (DIV0 - 2)) / DIV0).wrapping_mul(2);
+        self.median[0] = self.median[0].wrapping_sub(d);
     }
     fn inc1(&mut self) {
-        self.median[1] += ((self.median[1] + DIV1) / DIV1) * 5;
+        let d = ((self.median[1] + DIV1) / DIV1).wrapping_mul(5);
+        self.median[1] = self.median[1].wrapping_add(d);
     }
     fn dec1(&mut self) {
-        self.median[1] -= ((self.median[1] + (DIV1 - 2)) / DIV1) * 2;
+        let d = ((self.median[1] + (DIV1 - 2)) / DIV1).wrapping_mul(2);
+        self.median[1] = self.median[1].wrapping_sub(d);
     }
     fn inc2(&mut self) {
-        self.median[2] += ((self.median[2] + DIV2) / DIV2) * 5;
+        let d = ((self.median[2] + DIV2) / DIV2).wrapping_mul(5);
+        self.median[2] = self.median[2].wrapping_add(d);
     }
     fn dec2(&mut self) {
-        self.median[2] -= ((self.median[2] + (DIV2 - 2)) / DIV2) * 2;
+        let d = ((self.median[2] + (DIV2 - 2)) / DIV2).wrapping_mul(2);
+        self.median[2] = self.median[2].wrapping_sub(d);
     }
 }
 
 /// Decoder state shared across one block's samples (both channels).
+#[cfg(feature = "decode")]
 pub struct WordsDecoder {
     pub c: [Medians; 2],
     holding_one: u32,
@@ -59,6 +70,7 @@ pub struct WordsDecoder {
     zeros_acc: u32,
 }
 
+#[cfg(feature = "decode")]
 impl WordsDecoder {
     /// Initialize from an `ID_ENTROPY_VARS` payload: three little-endian u16
     /// log2 medians per channel (6 bytes mono, 12 stereo), expanded via
@@ -190,8 +202,217 @@ impl WordsDecoder {
     }
 }
 
+#[cfg(feature = "encode")]
+#[inline]
+fn count_bits(v: u32) -> u32 {
+    if v == 0 { 0 } else { 32 - v.leading_zeros() }
+}
+
+/// The median-adaptive entropy *encoder*, the exact mirror of [`WordsDecoder`]
+/// (`send_words_lossless` + `flush_word`). Starts from all-zero state, which is
+/// what a fresh single block's `ID_ENTROPY_VARS` records.
+#[cfg(feature = "encode")]
+pub struct WordsEncoder {
+    c: [Medians; 2],
+    holding_one: u32,
+    holding_zero: bool,
+    zeros_acc: u32,
+    pend_data: u32,
+    pend_count: u32,
+}
+
+#[cfg(feature = "encode")]
+impl WordsEncoder {
+    pub fn new() -> Self {
+        Self {
+            c: [Medians::default(); 2],
+            holding_one: 0,
+            holding_zero: false,
+            zeros_acc: 0,
+            pend_data: 0,
+            pend_count: 0,
+        }
+    }
+
+    /// The starting medians are all zero, so `ID_ENTROPY_VARS` for a fresh
+    /// single block is six (mono) or twelve (stereo) zero bytes.
+    pub fn entropy_vars(mono: bool) -> Vec<u8> {
+        vec![0u8; if mono { 6 } else { 12 }]
+    }
+
+    fn flush_word(&mut self, bw: &mut crate::bitstream::BitWriter) {
+        if self.zeros_acc != 0 {
+            let cbits = count_bits(self.zeros_acc);
+            for _ in 0..cbits {
+                bw.putbit(1);
+            }
+            bw.putbit(0);
+            while self.zeros_acc > 1 {
+                bw.putbit(self.zeros_acc & 1);
+                self.zeros_acc >>= 1;
+            }
+            self.zeros_acc = 0;
+        }
+
+        if self.holding_one != 0 {
+            if self.holding_one >= LIMIT_ONES {
+                bw.putbits((1 << LIMIT_ONES) - 1, LIMIT_ONES + 1);
+                self.holding_one -= LIMIT_ONES;
+                let cbits = count_bits(self.holding_one);
+                for _ in 0..cbits {
+                    bw.putbit(1);
+                }
+                bw.putbit(0);
+                while self.holding_one > 1 {
+                    bw.putbit(self.holding_one & 1);
+                    self.holding_one >>= 1;
+                }
+                self.holding_zero = false;
+            } else {
+                bw.putbits((1u32 << self.holding_one) - 1, self.holding_one);
+            }
+            self.holding_one = 0;
+        }
+
+        if self.holding_zero {
+            bw.putbit(0);
+            self.holding_zero = false;
+        }
+
+        if self.pend_count != 0 {
+            bw.putbits(self.pend_data, self.pend_count);
+            self.pend_data = 0;
+            self.pend_count = 0;
+        }
+    }
+
+    /// Encode `nframes` frames (mono: one sample each; stereo: two interleaved)
+    /// into `bw`. The residuals in `buffer` are consumed as-is.
+    pub fn send_words_lossless(
+        &mut self,
+        bw: &mut crate::bitstream::BitWriter,
+        buffer: &[i32],
+        nframes: u32,
+        mono: bool,
+    ) {
+        let nsamples = if mono { nframes } else { nframes * 2 } as usize;
+
+        for (idx, &value) in buffer.iter().take(nsamples).enumerate() {
+            let chan = if mono { 0 } else { idx & 1 };
+            let sign = value < 0;
+
+            if self.c[0].median[0] < 2 && !self.holding_zero && self.c[1].median[0] < 2 {
+                if self.zeros_acc != 0 {
+                    if value != 0 {
+                        self.flush_word(bw);
+                    } else {
+                        self.zeros_acc += 1;
+                        continue;
+                    }
+                } else if value != 0 {
+                    bw.putbit(0);
+                } else {
+                    self.c[0] = Medians::default();
+                    self.c[1] = Medians::default();
+                    self.zeros_acc = 1;
+                    continue;
+                }
+            }
+
+            let v: u32 = if sign { !value as u32 } else { value as u32 };
+
+            let cm = &mut self.c[chan];
+            let (mut ones_count, mut low, high);
+            let m0 = cm.get(0);
+            if v < m0 {
+                ones_count = 0;
+                low = 0;
+                high = m0 - 1;
+                cm.dec0();
+            } else {
+                low = m0;
+                cm.inc0();
+                let m1 = cm.get(1);
+                if v - low < m1 {
+                    ones_count = 1;
+                    high = low + m1 - 1;
+                    cm.dec1();
+                } else {
+                    low += m1;
+                    cm.inc1();
+                    let m2 = cm.get(2);
+                    if v - low < m2 {
+                        ones_count = 2;
+                        high = low + m2 - 1;
+                        cm.dec2();
+                    } else {
+                        ones_count = 2 + (v - low) / m2;
+                        low += (ones_count - 2) * m2;
+                        high = low + m2 - 1;
+                        cm.inc2();
+                    }
+                }
+            }
+
+            if self.holding_zero {
+                if ones_count != 0 {
+                    self.holding_one += 1;
+                }
+                self.flush_word(bw);
+                if ones_count != 0 {
+                    self.holding_zero = true;
+                    ones_count -= 1;
+                } else {
+                    self.holding_zero = false;
+                }
+            } else {
+                self.holding_zero = true;
+            }
+
+            self.holding_one = ones_count * 2;
+
+            if high != low {
+                let maxcode = high - low;
+                let code = v - low;
+                let bitcount = count_bits(maxcode);
+                let extras = (1u32 << bitcount) - maxcode - 1;
+                if code < extras {
+                    self.pend_data |= code << self.pend_count;
+                    self.pend_count += bitcount - 1;
+                } else {
+                    self.pend_data |= ((code + extras) >> 1) << self.pend_count;
+                    self.pend_count += bitcount - 1;
+                    self.pend_data |= ((code + extras) & 1) << self.pend_count;
+                    self.pend_count += 1;
+                }
+            }
+
+            self.pend_data |= (sign as u32) << self.pend_count;
+            self.pend_count += 1;
+
+            if !self.holding_zero {
+                self.flush_word(bw);
+            }
+        }
+    }
+
+    /// Final flush after the last sample, matching the reference `pack_samples`
+    /// which calls `flush_word` once more before closing the bitstream.
+    pub fn finish(&mut self, bw: &mut crate::bitstream::BitWriter) {
+        self.flush_word(bw);
+    }
+}
+
+#[cfg(feature = "encode")]
+impl Default for WordsEncoder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// `wp_exp2s` from `entropy_utils.c`: expand a signed 16.8-style log2 value
 /// back to a 32-bit integer, table-driven.
+#[cfg(feature = "decode")]
 pub fn wp_exp2s(log: i32) -> i32 {
     if log < 0 {
         return -wp_exp2s(-log);
@@ -205,6 +426,7 @@ pub fn wp_exp2s(log: i32) -> i32 {
     }
 }
 
+#[cfg(feature = "decode")]
 const EXP2_TABLE: [u8; 256] = [
     0x00, 0x01, 0x01, 0x02, 0x03, 0x03, 0x04, 0x05, 0x06, 0x06, 0x07, 0x08, 0x08, 0x09, 0x0a,
     0x0b, 0x0b, 0x0c, 0x0d, 0x0e, 0x0e, 0x0f, 0x10, 0x10, 0x11, 0x12, 0x13, 0x13, 0x14, 0x15,
@@ -226,7 +448,7 @@ const EXP2_TABLE: [u8; 256] = [
     0xff,
 ];
 
-#[cfg(test)]
+#[cfg(all(test, feature = "decode"))]
 mod tests {
     use super::*;
 

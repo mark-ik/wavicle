@@ -245,6 +245,121 @@ fn float_decode_is_bit_exact_and_blake3_stable() {
     }
 }
 
+/// M4 gate. For each generated integer buffer: (1) our encode then our decode
+/// reproduces the input (self round-trip, runs everywhere), and (2) our encode
+/// then the reference `wvunpack -r` reproduces the input, proving a real
+/// decoder accepts our stream. The reference leg is skipped when the pinned
+/// CLI is not present (the same Layer-0/Layer-1 split as decode).
+#[cfg(feature = "encode")]
+#[test]
+fn encode_round_trips_losslessly_through_ourselves_and_the_reference() {
+    use wavicle::{EncodeParams, encode_int};
+
+    fn tone(n: usize, rate: u32, freq: f64, amp: f64, scale: i32) -> Vec<i32> {
+        (0..n)
+            .map(|i| {
+                let s = amp * (2.0 * std::f64::consts::PI * freq * i as f64 / rate as f64).sin();
+                (s * scale as f64).round() as i32
+            })
+            .collect()
+    }
+
+    struct Case {
+        name: &'static str,
+        params: EncodeParams,
+        samples: Vec<i32>,
+    }
+    let p = |channels, sample_rate, bits_per_sample| EncodeParams {
+        channels,
+        sample_rate,
+        bits_per_sample,
+    };
+    let max16 = (1 << 15) - 1;
+    let max24 = (1 << 23) - 1;
+    let cases = vec![
+        Case { name: "i16 mono tone", params: p(1, 48000, 16), samples: tone(4000, 48000, 220.0, 0.6, max16) },
+        Case {
+            name: "i16 stereo",
+            params: p(2, 44100, 16),
+            samples: {
+                let l = tone(3000, 44100, 220.0, 0.6, max16);
+                let r = tone(3000, 44100, 330.0, 0.5, max16);
+                l.iter().zip(&r).flat_map(|(a, b)| [*a, *b]).collect()
+            },
+        },
+        Case { name: "i16 silence", params: p(2, 48000, 16), samples: vec![0; 4000] },
+        Case { name: "i16 full scale", params: p(1, 48000, 16), samples: (0..2000).map(|i| if i % 2 == 0 { max16 } else { -max16 - 1 }).collect() },
+        Case { name: "i24 stereo", params: p(2, 48000, 24), samples: {
+            let l = tone(2000, 48000, 261.0, 0.7, max24);
+            let r = tone(2000, 48000, 392.0, 0.4, max24);
+            l.iter().zip(&r).flat_map(|(a, b)| [*a, *b]).collect()
+        }},
+        Case { name: "i32 mono", params: p(1, 48000, 32), samples: tone(2000, 48000, 174.0, 0.5, 1 << 23) },
+        Case { name: "i16 ramp mono", params: p(1, 48000, 16), samples: (0..2000).map(|i| ((i as i32 * 17) % 65535) - 32768).collect() },
+    ];
+
+    // Locate the pinned reference wvunpack, if present.
+    let tool = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../testing/wavicle/tools/wvunpack.exe");
+    let have_ref = tool.exists();
+    let mut ref_checked = 0;
+
+    for case in &cases {
+        let wv = encode_int(case.params, &case.samples)
+            .unwrap_or_else(|e| panic!("{}: encode failed: {e}", case.name));
+
+        // (1) self round-trip
+        let decoded = wavicle::decode_stream(&wv)
+            .unwrap_or_else(|e| panic!("{}: self-decode failed: {e}", case.name));
+        assert_eq!(
+            decoded.samples, case.samples,
+            "{}: self round-trip mismatch",
+            case.name
+        );
+
+        // (2) reference round-trip
+        if have_ref {
+            let dir = std::env::temp_dir();
+            let wv_path = dir.join(format!("wavicle_m4_{}.wv", case.name.replace(' ', "_")));
+            let raw_path = dir.join(format!("wavicle_m4_{}.raw", case.name.replace(' ', "_")));
+            std::fs::write(&wv_path, &wv).unwrap();
+            let status = std::process::Command::new(&tool)
+                .args(["-r", "-y", "-q"])
+                .arg(&wv_path)
+                .arg("-o")
+                .arg(&raw_path)
+                .status()
+                .expect("run wvunpack");
+            assert!(status.success(), "{}: wvunpack rejected our stream", case.name);
+            let raw = std::fs::read(&raw_path).unwrap();
+            let bytes = (case.params.bits_per_sample / 8) as usize;
+            let ref_samples: Vec<i32> = raw
+                .chunks_exact(bytes)
+                .map(|b| match bytes {
+                    2 => i32::from(i16::from_le_bytes([b[0], b[1]])),
+                    3 => i32::from_le_bytes([b[0], b[1], b[2], 0]) << 8 >> 8,
+                    4 => i32::from_le_bytes([b[0], b[1], b[2], b[3]]),
+                    _ => unreachable!(),
+                })
+                .collect();
+            assert_eq!(
+                ref_samples, case.samples,
+                "{}: reference wvunpack round-trip mismatch",
+                case.name
+            );
+            let _ = std::fs::remove_file(&wv_path);
+            let _ = std::fs::remove_file(&raw_path);
+            ref_checked += 1;
+        }
+    }
+
+    if have_ref {
+        assert_eq!(ref_checked, cases.len(), "all cases should hit the reference");
+    } else {
+        eprintln!("note: reference wvunpack absent; ran self round-trip only");
+    }
+}
+
 /// A corrupted payload must fail with a CRC error, never decode silently.
 #[test]
 fn corrupt_audio_fails_the_crc_hard() {

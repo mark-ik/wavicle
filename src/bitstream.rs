@@ -158,6 +158,71 @@ impl<'a> BitReader<'a> {
     }
 }
 
+/// LSB-first bit writer, the mirror of [`BitReader`] and the reference
+/// `putbit`/`putbits` macros. Emits whole bytes; [`close`](BitWriter::close)
+/// flushes the partial byte with one-bits and pads to an even byte count,
+/// exactly as the reference `bs_close_write` does.
+#[cfg(feature = "encode")]
+pub struct BitWriter {
+    out: Vec<u8>,
+    sr: u32,
+    bc: u32,
+}
+
+#[cfg(feature = "encode")]
+impl BitWriter {
+    pub fn new() -> Self {
+        Self {
+            out: Vec::new(),
+            sr: 0,
+            bc: 0,
+        }
+    }
+
+    #[inline]
+    pub fn putbit(&mut self, bit: u32) {
+        if bit & 1 != 0 {
+            self.sr |= 1 << self.bc;
+        }
+        self.bc += 1;
+        if self.bc == 8 {
+            self.out.push(self.sr as u8);
+            self.sr = 0;
+            self.bc = 0;
+        }
+    }
+
+    #[inline]
+    pub fn putbits(&mut self, value: u32, nbits: u32) {
+        for i in 0..nbits {
+            self.putbit((value >> i) & 1);
+        }
+    }
+
+    /// Flush to a byte boundary with one-bits, then ensure an even byte count
+    /// (the WavPack sub-block requirement), and return the buffer.
+    pub fn close(mut self) -> Vec<u8> {
+        loop {
+            while self.bc != 0 {
+                self.putbit(1);
+            }
+            if self.out.len() & 1 == 1 {
+                self.putbit(1);
+            } else {
+                break;
+            }
+        }
+        self.out
+    }
+}
+
+#[cfg(feature = "encode")]
+impl Default for BitWriter {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

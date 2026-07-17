@@ -10,6 +10,7 @@
 //! application rounding, the sign-trick weight updates, and the +/-1024 clip
 //! used by the cross-channel terms.
 
+#[cfg(feature = "decode")]
 use crate::entropy::wp_exp2s;
 use crate::error::Error;
 
@@ -27,6 +28,7 @@ pub struct DecorrPass {
 }
 
 /// Parse `ID_DECORR_TERMS`. `passes[0]` receives the *last* stored byte.
+#[cfg(feature = "decode")]
 pub fn read_decorr_terms(data: &[u8], mono: bool) -> Result<Vec<DecorrPass>, Error> {
     if data.len() > MAX_NTERMS {
         return Err(Error::BadSubBlock { id: 0x02 });
@@ -50,6 +52,7 @@ pub fn read_decorr_terms(data: &[u8], mono: bool) -> Result<Vec<DecorrPass>, Err
 }
 
 /// `restore_weight` from `entropy_utils.c`.
+#[cfg(feature = "decode")]
 fn restore_weight(weight: i8) -> i32 {
     let mut result = i32::from(weight) * 8;
     if result > 0 {
@@ -59,6 +62,7 @@ fn restore_weight(weight: i8) -> i32 {
 }
 
 /// Parse `ID_DECORR_WEIGHTS`: stored from the last pass backward.
+#[cfg(feature = "decode")]
 pub fn read_decorr_weights(
     data: &[u8],
     passes: &mut [DecorrPass],
@@ -80,6 +84,7 @@ pub fn read_decorr_weights(
 
 /// Parse `ID_DECORR_SAMPLES`: history from the last pass backward, layout
 /// depending on each pass's term.
+#[cfg(feature = "decode")]
 pub fn read_decorr_samples(
     data: &[u8],
     passes: &mut [DecorrPass],
@@ -156,6 +161,7 @@ fn update_weight(weight: &mut i32, delta: i32, source: i32, result: i32) {
 
 /// `update_weight_clip`: as above but clipped to +/-1024 (cross-channel terms).
 #[inline]
+#[cfg(feature = "decode")]
 fn update_weight_clip(weight: &mut i32, delta: i32, source: i32, result: i32) {
     if source != 0 && result != 0 {
         let s = (source ^ result) >> 31;
@@ -167,7 +173,93 @@ fn update_weight_clip(weight: &mut i32, delta: i32, source: i32, result: i32) {
     }
 }
 
+/// One forward mono pass (`decorr_mono_buffer` for a single term), the exact
+/// inverse of [`decorr_mono_pass`]. Positive terms 1..8 and 17/18. Sample
+/// history is left un-normalized, which is fine for single-block encoding.
+#[cfg(feature = "encode")]
+pub fn forward_decorr_mono_pass(dpp: &mut DecorrPass, buffer: &mut [i32]) {
+    let delta = dpp.delta;
+    let mut weight = dpp.weight_a;
+    let mut m = 0usize;
+    let mut k = (dpp.term as usize) & (MAX_TERM - 1);
+
+    for s in buffer.iter_mut() {
+        let orig = *s;
+        let sam = if dpp.term > MAX_TERM as i32 {
+            let sam = if dpp.term & 1 != 0 {
+                2i32.wrapping_mul(dpp.samples_a[0])
+                    .wrapping_sub(dpp.samples_a[1])
+            } else {
+                (3i32.wrapping_mul(dpp.samples_a[0]).wrapping_sub(dpp.samples_a[1])) >> 1
+            };
+            dpp.samples_a[1] = dpp.samples_a[0];
+            dpp.samples_a[0] = orig;
+            sam
+        } else {
+            let sam = dpp.samples_a[m];
+            dpp.samples_a[k] = orig;
+            sam
+        };
+        let code = orig.wrapping_sub(apply_weight(weight, sam));
+        update_weight(&mut weight, delta, sam, code);
+        *s = code;
+        m = (m + 1) & (MAX_TERM - 1);
+        k = (k + 1) & (MAX_TERM - 1);
+    }
+    dpp.weight_a = weight;
+}
+
+/// One forward stereo pass, the exact inverse of [`decorr_stereo_pass`], for
+/// positive terms 1..8 and 17/18 (no cross-channel terms at this milestone).
+#[cfg(feature = "encode")]
+pub fn forward_decorr_stereo_pass(dpp: &mut DecorrPass, buffer: &mut [i32]) {
+    let delta = dpp.delta;
+    match dpp.term {
+        17 | 18 => {
+            for f in buffer.chunks_exact_mut(2) {
+                for (samples, weight, val) in [
+                    (&mut dpp.samples_a, &mut dpp.weight_a, 0usize),
+                    (&mut dpp.samples_b, &mut dpp.weight_b, 1usize),
+                ] {
+                    let sam = if dpp.term == 17 {
+                        2i32.wrapping_mul(samples[0]).wrapping_sub(samples[1])
+                    } else {
+                        samples[0].wrapping_add(samples[0].wrapping_sub(samples[1]) >> 1)
+                    };
+                    samples[1] = samples[0];
+                    samples[0] = f[val];
+                    let tmp = f[val].wrapping_sub(apply_weight(*weight, sam));
+                    f[val] = tmp;
+                    update_weight(weight, delta, sam, tmp);
+                }
+            }
+        }
+        term if term > 0 => {
+            let mut m = 0usize;
+            let mut k = (term as usize) & (MAX_TERM - 1);
+            for f in buffer.chunks_exact_mut(2) {
+                let sam = dpp.samples_a[m];
+                dpp.samples_a[k] = f[0];
+                let tmp = f[0].wrapping_sub(apply_weight(dpp.weight_a, sam));
+                f[0] = tmp;
+                update_weight(&mut dpp.weight_a, delta, sam, tmp);
+
+                let sam = dpp.samples_b[m];
+                dpp.samples_b[k] = f[1];
+                let tmp = f[1].wrapping_sub(apply_weight(dpp.weight_b, sam));
+                f[1] = tmp;
+                update_weight(&mut dpp.weight_b, delta, sam, tmp);
+
+                m = (m + 1) & (MAX_TERM - 1);
+                k = (k + 1) & (MAX_TERM - 1);
+            }
+        }
+        _ => unreachable!("encode uses only positive terms"),
+    }
+}
+
 /// One inverse pass over a mono buffer (`decorr_mono_pass`).
+#[cfg(feature = "decode")]
 pub fn decorr_mono_pass(dpp: &mut DecorrPass, buffer: &mut [i32]) {
     let delta = dpp.delta;
     let mut weight = dpp.weight_a;
@@ -222,6 +314,7 @@ pub fn decorr_mono_pass(dpp: &mut DecorrPass, buffer: &mut [i32]) {
 }
 
 /// One inverse pass over an interleaved stereo buffer (`decorr_stereo_pass`).
+#[cfg(feature = "decode")]
 pub fn decorr_stereo_pass(dpp: &mut DecorrPass, buffer: &mut [i32]) {
     let delta = dpp.delta;
 
