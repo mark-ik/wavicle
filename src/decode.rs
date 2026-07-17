@@ -15,6 +15,7 @@ use crate::decorr::{
 };
 use crate::entropy::WordsDecoder;
 use crate::error::Error;
+use crate::float::{FloatInfo, float_values, float_values_nowvx};
 use crate::format::{Flags, meta};
 
 /// A fully decoded stream: interleaved samples plus the facts needed to
@@ -43,9 +44,6 @@ pub fn decode_stream(stream: &[u8]) -> Result<DecodedStream, Error> {
         if h.block_samples == 0 {
             continue;
         }
-        if h.flags.is_float() {
-            return Err(Error::NotYetImplemented("32-bit float decode (M3)"));
-        }
         if h.flags.bytes_per_sample() == 1 {
             return Err(Error::NotYetImplemented("8-bit integer decode"));
         }
@@ -63,7 +61,7 @@ pub fn decode_stream(stream: &[u8]) -> Result<DecodedStream, Error> {
                     channels: h.flags.output_channels(),
                     sample_rate: rate,
                     bits_per_sample: h.flags.bytes_per_sample() * 8,
-                    is_float: false,
+                    is_float: h.flags.is_float(),
                 })
             }
             Some(existing) => existing.samples.extend_from_slice(&samples),
@@ -86,6 +84,7 @@ fn decode_block(block: &crate::block::Block<'_>) -> Result<Vec<i32>, Error> {
     let mut words: Option<WordsDecoder> = None;
     let mut wv_payload: Option<&[u8]> = None;
     let mut int32_info: Option<[u8; 4]> = None;
+    let mut float_info: Option<FloatInfo> = None;
     let mut wvx: Option<(&[u8], bool)> = None; // (payload incl. crc, new format)
 
     for sub in block.sub_blocks() {
@@ -116,6 +115,7 @@ fn decode_block(block: &crate::block::Block<'_>) -> Result<Vec<i32>, Error> {
                     .map_err(|_| Error::BadSubBlock { id: sub.id })?;
                 int32_info = Some(b);
             }
+            meta::FLOAT_INFO => float_info = Some(FloatInfo::parse(sub.data)?),
             meta::WVX_BITSTREAM => wvx = Some((sub.data, false)),
             meta::WVX_NEW_BITSTREAM => wvx = Some((sub.data, true)),
             _ => {}
@@ -184,8 +184,40 @@ fn decode_block(block: &crate::block::Block<'_>) -> Result<Vec<i32>, Error> {
         });
     }
 
-    // Fixup, per the reference's lossless path: extended-integer restoration
-    // (with the wvx extension bits when present), then the final left-shift.
+    // Fixup, per the reference `fixup_samples`. Float takes its own path and
+    // returns; otherwise extended-integer restoration then the final shift.
+    if flags.is_float() {
+        let info = float_info.ok_or(Error::MissingSubBlock("float info"))?;
+        match wvx {
+            Some((payload, is_new)) => {
+                if payload.len() <= 4 || payload.len() % 2 != 0 {
+                    return Err(Error::BadSubBlock {
+                        id: meta::WVX_BITSTREAM,
+                    });
+                }
+                let crc_wvx = u32::from_le_bytes(payload[0..4].try_into().expect("checked"));
+                let mut xbits = BitReader::new(&payload[4..]);
+                let (min_zeros, max_ones) = if is_new {
+                    (xbits.getbits(5) & 0x1f, xbits.getbits(5) & 0x1f)
+                } else {
+                    (0, 0)
+                };
+                let crc_x = float_values(&mut buffer, info, min_zeros, max_ones, &mut xbits, 0xffffffff);
+                if xbits.errored() {
+                    return Err(Error::Truncated { need: 1, have: 0 });
+                }
+                if crc_x != crc_wvx {
+                    return Err(Error::CrcMismatch {
+                        stored: crc_wvx,
+                        computed: crc_x,
+                    });
+                }
+            }
+            None => float_values_nowvx(&mut buffer, info),
+        }
+        return finish_false_stereo(buffer, flags, frames);
+    }
+
     let mut shift = flags.output_shift();
 
     if flags.0 & Flags::INT32_DATA != 0 {
@@ -274,15 +306,18 @@ fn decode_block(block: &crate::block::Block<'_>) -> Result<Vec<i32>, Error> {
         }
     }
 
-    // FALSE_STEREO: stored mono, output stereo.
-    if flags.0 & Flags::FALSE_STEREO != 0 {
-        let mut expanded = Vec::with_capacity(frames * 2);
-        for s in &buffer {
-            expanded.push(*s);
-            expanded.push(*s);
-        }
-        buffer = expanded;
-    }
+    finish_false_stereo(buffer, flags, frames)
+}
 
-    Ok(buffer)
+/// FALSE_STEREO expands a mono-stored block to interleaved stereo output.
+fn finish_false_stereo(buffer: Vec<i32>, flags: Flags, frames: usize) -> Result<Vec<i32>, Error> {
+    if flags.0 & Flags::FALSE_STEREO == 0 {
+        return Ok(buffer);
+    }
+    let mut expanded = Vec::with_capacity(frames * 2);
+    for s in &buffer {
+        expanded.push(*s);
+        expanded.push(*s);
+    }
+    Ok(expanded)
 }

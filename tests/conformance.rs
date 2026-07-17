@@ -200,6 +200,51 @@ fn decode_matches_reference_raw_output_for_every_int_fixture() {
     }
 }
 
+/// M3 gate: float decode must reproduce the exact 32-bit IEEE-754 pattern of
+/// every sample, compared via bit patterns (never float `==`, which is wrong
+/// for NaN and signed zero). And the BLAKE3 hash of the decoded f32 bytes must
+/// equal the hash of the reference's decoded bytes: the media-identity
+/// invariant the consumer keys on.
+#[test]
+fn float_decode_is_bit_exact_and_blake3_stable() {
+    for name in ["f32_mono", "f32_stereo", "f32_specials_mono"] {
+        let (wv, _) = fixture(name);
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+        let golden = std::fs::read(dir.join(format!("{name}.decoded.raw"))).expect("golden");
+
+        let decoded =
+            wavicle::decode_stream(&wv).unwrap_or_else(|e| panic!("{name}: decode failed: {e}"));
+        assert!(decoded.is_float, "{name}: should report float");
+        assert_eq!(decoded.bits_per_sample, 32, "{name}: 32-bit");
+
+        // Our samples are IEEE bit patterns as i32; the golden is raw LE f32.
+        let ours: Vec<u8> = decoded
+            .samples
+            .iter()
+            .flat_map(|s| (*s as u32).to_le_bytes())
+            .collect();
+        assert_eq!(ours.len(), golden.len(), "{name}: byte length");
+
+        for (i, (a, b)) in ours
+            .chunks_exact(4)
+            .zip(golden.chunks_exact(4))
+            .enumerate()
+        {
+            if a != b {
+                let ab = u32::from_le_bytes(a.try_into().unwrap());
+                let bb = u32::from_le_bytes(b.try_into().unwrap());
+                panic!("{name}: sample {i} bits differ: ours {ab:#010x}, reference {bb:#010x}");
+            }
+        }
+
+        assert_eq!(
+            blake3::hash(&ours),
+            blake3::hash(&golden),
+            "{name}: BLAKE3 identity must survive the round trip"
+        );
+    }
+}
+
 /// A corrupted payload must fail with a CRC error, never decode silently.
 #[test]
 fn corrupt_audio_fails_the_crc_hard() {

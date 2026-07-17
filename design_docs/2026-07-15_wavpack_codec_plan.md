@@ -445,6 +445,23 @@ that step:
   encoder emitted a classic `0x0c` wvx for it. Gate green: decode
   sample-identical to `wvunpack -r` for all eight integer fixtures; wasm
   clean. The wvx machinery is the shared substrate float needs, so M3 starts
-  from a working extension stream. Next: M3, float decode
-  (`unpack_floats.c`: `float_values`, the six `float_flags` paths, exact IEEE
-  reconstruction).
+  from a working extension stream.
+- 2026-07-15: **M3 LANDED — bit-exact float decode. This is the milestone the
+  crate exists for.** Ported `float_values` and `float_values_nowvx` from
+  `unpack_floats.c` plus the f32 sign/exponent/mantissa accessor macros: the
+  six `float_flags` paths (SHIFT_ONES/SAME/SENT, ZEROS_SENT, NEG_ZEROS,
+  EXCEPTIONS), the wvx float prefix (`min_shifted_zeros`/`max_shifted_ones`
+  for the new format; 0 for classic), and the `crc_x` (seed `0xffffffff`,
+  `crc*27 + mantissa*9 + exponent*3 + sign`) checked against `crc_wvx`. Float
+  reconstruction is integer-only, producing exact IEEE-754 bit patterns; the
+  block CRC still validates the aligned-mantissa integers before expansion,
+  and float takes its own fixup branch (no header shift; `float_shift` applies
+  inside). Gate green on three float fixtures including a new adversarial
+  `f32_specials_mono` (+/-0.0, smallest/largest denormals, +/-inf, quiet and
+  signaling NaN with payloads, max normal): **every sample's 32-bit pattern
+  matches `wvunpack -r` exactly** (compared as bits, never float `==`), and
+  **the BLAKE3 hash of the decoded f32 bytes equals the reference's** — the
+  media-identity invariant Hocket keys on, proven end to end. wasm and
+  no-default-features clean. The full decoder is now complete for the tiny
+  profile: 16/24/32-bit int and 32-bit float, mono/stereo, all lossless.
+  Next: M4, the encoder (fixed decorrelation config, integer first).

@@ -88,6 +88,31 @@ def fixtures():
         f"{r48},32f,2,le",
         [],
     )
+    # Adversarial float values: the reconstruction must reproduce these exact
+    # 32-bit patterns, including signed zero, denormals, NaN payloads, and
+    # infinities. Given as raw bit patterns, tiled with a quiet tone so the
+    # encoder has ordinary material around the exceptions.
+    specials = [
+        0x00000000,  # +0.0
+        0x80000000,  # -0.0
+        0x3F800000,  # 1.0
+        0xBF800000,  # -1.0
+        0x00000001,  # smallest positive denormal
+        0x80000001,  # smallest negative denormal
+        0x007FFFFF,  # largest denormal
+        0x7F800000,  # +inf
+        0xFF800000,  # -inf
+        0x7FC00000,  # quiet NaN
+        0x7F800001,  # signaling NaN, payload 1
+        0x7FFFFFFF,  # NaN, full payload
+        0xFFC00000,  # negative quiet NaN
+        0x7F7FFFFF,  # max finite normal
+        0x00800000,  # smallest positive normal
+        0x3F000000,  # 0.5
+    ]
+    special_bytes = b"".join(struct.pack("<I", b) for b in specials)
+    quiet = pack_f32(tone(240, r48, 55.0, 0.02))
+    fx["f32_specials_mono"] = (special_bytes * 16 + quiet, f"{r48},32f,1,le", [])
     # Identical channels: the 0x410 reference stores this mono with FALSE_STEREO.
     same = tone(n, r48, 110.0, 0.5)
     fx["false_stereo"] = (pack_i16(interleave(same, same)), f"{r48},16s,2,le", [])

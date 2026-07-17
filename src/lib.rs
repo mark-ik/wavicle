@@ -9,14 +9,15 @@
 //! wasm-capable. Out of scope: DSD, hybrid/lossy modes, correction files,
 //! more than two channels, pre-4.0 legacy streams.
 //!
-//! **Status: M2 (integer decode complete).** Lossless decode of 16/24/32-bit
-//! mono and stereo streams (joint stereo, false stereo, zero-run silence,
-//! multiblock, and the wvx extension for >24-bit) is verified sample-for-sample
-//! against the reference wvunpack -r, with both CRCs enforced as hard errors.
-//! Block parsing and scope gates landed at M0. Not yet implemented:
-//! float (M3) and the encoder (M4+). The founding
-//! plan, milestone ladder, and conformance-oracle method live in the
-//! repository's `design_docs/`.
+//! **Status: M3 (lossless decoder complete).** Bit-exact lossless decode of
+//! 16/24/32-bit integer and 32-bit float, mono and stereo (joint stereo,
+//! false stereo, zero-run silence, multiblock, the wvx extension for >24-bit
+//! integers and float). Verified sample-for-sample against the reference
+//! wvunpack -r, with all CRCs enforced as hard errors; float decode also
+//! passes a BLAKE3 round-trip identity check over the decoded f32 bytes.
+//! Block parsing and scope gates landed at M0. The encoder (M4+) is not yet
+//! implemented. The founding plan, milestone ladder, and conformance-oracle
+//! method live in the repository's `design_docs/`.
 
 #![forbid(unsafe_code)]
 
@@ -33,6 +34,8 @@ pub mod decode;
 pub mod decorr;
 #[cfg(feature = "decode")]
 pub mod entropy;
+#[cfg(feature = "decode")]
+pub mod float;
 
 pub use block::{Block, BlockHeader, Blocks, StreamInfo};
 #[cfg(feature = "decode")]
