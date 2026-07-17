@@ -1,0 +1,13 @@
+[package]
+name = "wavicle"
+version = "0.0.1"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+description = "A pure-Rust WavPack v5 codec: lossless mono/stereo decode and encode, bit-exact 32-bit float. Name claim; implementation in progress."
+repository = "https://github.com/mark-ik/wavicle"
+readme = "README.md"
+keywords = ["wavpack", "audio", "codec", "lossless", "compression"]
+categories = ["multimedia::audio", "compression"]
+exclude = ["design_docs/"]
+
+[dependencies]
