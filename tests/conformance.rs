@@ -139,6 +139,65 @@ fn single_block_fixtures_scan_as_one_block() {
     assert_eq!(StreamInfo::scan(&wv).expect("scan").block_count, 1);
 }
 
+/// M1 gate: our lossless decode must equal `wvunpack -r` output exactly for
+/// every 16-bit fixture. The goldens are the reference's own raw decode
+/// (native-width little-endian interleaved), compared at the typed-sample
+/// level.
+#[test]
+fn decode_matches_reference_raw_output_for_every_int16_fixture() {
+    let names = [
+        "int16_mono",
+        "int16_stereo",
+        "false_stereo",
+        "silence_stereo",
+        "multiblock_int16_mono",
+    ];
+    for name in names {
+        let (wv, _) = fixture(name);
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+        let golden_bytes =
+            std::fs::read(dir.join(format!("{name}.decoded.raw"))).expect("decode golden");
+        let golden: Vec<i32> = golden_bytes
+            .chunks_exact(2)
+            .map(|b| i32::from(i16::from_le_bytes([b[0], b[1]])))
+            .collect();
+
+        let decoded =
+            wavicle::decode_stream(&wv).unwrap_or_else(|e| panic!("{name}: decode failed: {e}"));
+
+        assert_eq!(
+            decoded.samples.len(),
+            golden.len(),
+            "{name}: sample count (ours {} vs reference {})",
+            decoded.samples.len(),
+            golden.len()
+        );
+        // Find the first mismatch, if any, for a readable failure.
+        if let Some((i, (ours, theirs))) = decoded
+            .samples
+            .iter()
+            .zip(golden.iter())
+            .enumerate()
+            .find(|(_, (a, b))| a != b)
+        {
+            panic!("{name}: first mismatch at sample {i}: ours {ours}, reference {theirs}");
+        }
+    }
+}
+
+/// A corrupted payload must fail with a CRC error, never decode silently.
+#[test]
+fn corrupt_audio_fails_the_crc_hard() {
+    let (mut wv, _) = fixture("int16_stereo");
+    // Flip a bit deep in the block payload (past header + early metadata).
+    let target = wv.len() / 2;
+    wv[target] ^= 0x10;
+    match wavicle::decode_stream(&wv) {
+        Err(_) => {}
+        Ok(_) => panic!("corrupted stream decoded without error"),
+    }
+}
+
 #[test]
 fn hybrid_stream_is_rejected_as_out_of_scope() {
     let (wv, ss) = fixture("hybrid_lossy_int16_stereo");

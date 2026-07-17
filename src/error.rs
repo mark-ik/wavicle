@@ -25,6 +25,16 @@ pub enum Error {
     UnknownRequiredId(u8),
     /// A later audio block changed the format the first block fixed.
     FormatChanged,
+    /// In scope for the crate, but not implemented at this milestone.
+    NotYetImplemented(&'static str),
+    /// The block's decoded samples do not match its stored CRC. The reference
+    /// silently mutes such a block; wavicle makes it a hard error so a
+    /// corrupt block can never silently alter decoded content.
+    CrcMismatch { stored: u32, computed: u32 },
+    /// A decoded sample exceeded the header's stated magnitude bound.
+    OverMagnitude,
+    /// A required metadata sub-block is missing from an audio block.
+    MissingSubBlock(&'static str),
     /// Audio blocks are not contiguous (unexpected first frame index).
     NonContiguousBlock { expected: u64, found: u64 },
 }
@@ -59,6 +69,12 @@ impl fmt::Display for Error {
             Self::FormatChanged => {
                 f.write_str("audio format changed after the first block fixed it")
             }
+            Self::NotYetImplemented(what) => write!(f, "not yet implemented: {what}"),
+            Self::CrcMismatch { stored, computed } => {
+                write!(f, "block CRC mismatch: stored {stored:#010x}, computed {computed:#010x}")
+            }
+            Self::OverMagnitude => f.write_str("decoded sample exceeds stated magnitude"),
+            Self::MissingSubBlock(what) => write!(f, "audio block missing {what}"),
             Self::NonContiguousBlock { expected, found } => {
                 write!(f, "non-contiguous block: expected frame {expected}, found {found}")
             }

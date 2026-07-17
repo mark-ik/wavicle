@@ -10,4 +10,11 @@ keywords = ["wavpack", "audio", "codec", "lossless", "compression"]
 categories = ["multimedia::audio", "compression"]
 exclude = ["design_docs/"]
 
+[features]
+# Decode-first per the plan: the default build is the reader. `encode` arrives
+# at M4 and is promoted into the defaults once oracle-clean.
+default = ["decode"]
+decode = []
+encode = []
+
 [dependencies]

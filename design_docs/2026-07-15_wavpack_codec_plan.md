@@ -412,4 +412,24 @@ that step:
   round-to-nearest centiseconds (two candidate renderings each failed one
   fixture before the corpus disambiguated). Strict block alignment only;
   resynchronization over leading tags is deferred to M1 with the corpus.
-  Next: M1, 16-bit integer decode.
+- 2026-07-15: **M1 LANDED — the first pure-Rust WavPack audio decode, oracle-
+  verified.** Ported from the 5.9.0-tag reference (matching the pinned oracle;
+  sources kept outside the repo): the LSB-first bitstream reader with the
+  reference's shift-register semantics (`read_code` and the unary/escape
+  counts, portable variant), the median-adaptive entropy decoder
+  (`get_words_lossless`, `wp_exp2s` + table, INC/DEC median updates), inverse
+  decorrelation (terms 17/18/1..8/-1/-2/-3, dual-path `apply_weight`, the
+  sign-trick `update_weight` and the +/-1024 clip), the joint-stereo un-mix,
+  both CRC formulas (seed `0xffffffff`, confirmed in `open_utils.c`), the
+  lossless shift fixup, and false-stereo expansion. Feature split live:
+  `default = ["decode"]`; M0 parsing builds with no features. Gate green:
+  decode is sample-for-sample identical to `wvunpack -r` for all five 16-bit
+  fixtures (mono, joint stereo, false-stereo, silence/zero-run, 5-block
+  multiblock); a corrupted payload fails the CRC as a hard error (deliberate
+  divergence: the reference mutes, wavicle errors); wasm32 and
+  no-default-features builds clean. One porting lesson recorded: within
+  `read_code` the first-read bit is the code's HIGH bit even though bits
+  stream LSB-first from bytes — a wrong test expectation caught by the
+  implementation, not the reverse. PROVENANCE.md now records per-module
+  lineage at tag 5.9.0. Next: M2, 24/32-bit integer decode (the `wvx`
+  extension stream for >24-bit).

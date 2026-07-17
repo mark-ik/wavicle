@@ -9,11 +9,14 @@
 //! wasm-capable. Out of scope: DSD, hybrid/lossy modes, correction files,
 //! more than two channels, pre-4.0 legacy streams.
 //!
-//! **Status: M0 (block parse).** The block header, metadata sub-block framing,
-//! scope gates, and a whole-stream [`StreamInfo`] scan are implemented and
-//! conformance-tested against reference-encoded fixtures. Sample decode is
-//! not implemented yet. The founding plan, milestone ladder, and
-//! conformance-oracle method live in the repository's `design_docs/`.
+//! **Status: M1 (16-bit integer decode).** Lossless decode of 16-bit mono and
+//! stereo streams (joint stereo, false stereo, zero-run silence, multiblock)
+//! is implemented and verified sample-for-sample against the reference
+//! `wvunpack -r` over the fixture corpus, with block CRCs enforced as hard
+//! errors. Block parsing and scope gates landed at M0. Not yet implemented:
+//! 24/32-bit integers (M2), float (M3), and the encoder (M4+). The founding
+//! plan, milestone ladder, and conformance-oracle method live in the
+//! repository's `design_docs/`.
 
 #![forbid(unsafe_code)]
 
@@ -22,5 +25,16 @@ pub mod error;
 pub mod format;
 pub mod metadata;
 
+#[cfg(feature = "decode")]
+pub mod bitstream;
+#[cfg(feature = "decode")]
+pub mod decode;
+#[cfg(feature = "decode")]
+pub mod decorr;
+#[cfg(feature = "decode")]
+pub mod entropy;
+
 pub use block::{Block, BlockHeader, Blocks, StreamInfo};
+#[cfg(feature = "decode")]
+pub use decode::{DecodedStream, decode_stream};
 pub use error::{Error, Scope};
