@@ -62,6 +62,20 @@ impl<'a> BitReader<'a> {
         bit
     }
 
+    /// Read `nbits` (1..=31) as an unsigned value, LSB-first: the reference
+    /// `getbits` macro. The caller masks to the bits it wants, as in C.
+    pub fn getbits(&mut self, nbits: u32) -> u32 {
+        let mut local_sr = u64::from(self.sr);
+        while self.bc < nbits {
+            local_sr |= u64::from(self.load_byte()) << self.bc;
+            self.bc += 8;
+        }
+        let value = local_sr as u32;
+        self.bc -= nbits;
+        self.sr = (local_sr >> nbits) as u32;
+        value
+    }
+
     /// Read an unsigned code in `0..=maxcode`, the reference `read_code`:
     /// a fixed bit count when the range is a power of two, otherwise the
     /// minimum count with one conditional extra bit.

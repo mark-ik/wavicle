@@ -431,5 +431,20 @@ that step:
   `read_code` the first-read bit is the code's HIGH bit even though bits
   stream LSB-first from bytes — a wrong test expectation caught by the
   implementation, not the reverse. PROVENANCE.md now records per-module
-  lineage at tag 5.9.0. Next: M2, 24/32-bit integer decode (the `wvx`
-  extension stream for >24-bit).
+  lineage at tag 5.9.0.
+- 2026-07-15: **M2 LANDED — 24/32-bit integer decode.** 24-bit needed nothing
+  beyond wider samples (the M1 path already carries i32). 32-bit brought the
+  real work: `ID_INT32_INFO` (sent_bits/zeros/ones/dups), the `wvx` extension
+  bitstream in both forms (`0x0c` classic; `0x2c` "new" with the 5-bit
+  max-width prefix), its leading 4-byte stored CRC, `getbits` (u64-accurate
+  port of the reference macro), the per-sample restoration paths
+  (bit-reinsertion with the max-width geometry; zeros/ones/dups transforms;
+  the shift-fold case), and the second CRC (`crc_x`, seed `0xffffffff`)
+  checked against the stream's `crc_wvx` as a hard error. New fixture
+  `int32_shifted_mono` (12 low zero bits) exercises the zeros path; the 5.9.0
+  encoder emitted a classic `0x0c` wvx for it. Gate green: decode
+  sample-identical to `wvunpack -r` for all eight integer fixtures; wasm
+  clean. The wvx machinery is the shared substrate float needs, so M3 starts
+  from a working extension stream. Next: M3, float decode
+  (`unpack_floats.c`: `float_values`, the six `float_flags` paths, exact IEEE
+  reconstruction).

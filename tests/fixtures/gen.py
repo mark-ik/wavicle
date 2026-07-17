@@ -75,6 +75,13 @@ def fixtures():
         f"{r48},32s,2,le",
         [],
     )
+    # 32-bit ints whose low 12 bits are zero: exercises the zeros/shift path
+    # of ID_INT32_INFO (no wvx stream needed for losslessness).
+    shifted = [
+        (round(s * ((1 << 19) - 1)) << 12) / float(1 << 31)
+        for s in tone(n, r48, 220.0, 0.6)
+    ]
+    fx["int32_shifted_mono"] = (pack_i32(shifted), f"{r48},32s,1,le", [])
     fx["f32_mono"] = (pack_f32(tone(n, r48, 220.0, 0.6)), f"{r48},32f,1,le", [])
     fx["f32_stereo"] = (
         pack_f32(interleave(tone(n, r48, 220.0, 0.6), tone(n, r48, 330.0, 0.5))),

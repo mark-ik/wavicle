@@ -154,5 +154,9 @@ pub mod meta {
     pub const ALT_MD5_CHECKSUM: u8 = 0x29;
     pub const NEW_CONFIG_BLOCK: u8 = 0x2a;
     pub const CHANNEL_IDENTITIES: u8 = 0x2b;
+    /// The wvx extension bitstream in its v5 "new" form: same payload as
+    /// [`WVX_BITSTREAM`] but prefixed (inside the bitstream) with 5-bit
+    /// width/shift fields. `ID_OPTIONAL_DATA | ID_WVX_BITSTREAM`.
+    pub const WVX_NEW_BITSTREAM: u8 = 0x2c;
     pub const BLOCK_CHECKSUM: u8 = 0x2f;
 }

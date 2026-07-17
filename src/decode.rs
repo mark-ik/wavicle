@@ -46,11 +46,8 @@ pub fn decode_stream(stream: &[u8]) -> Result<DecodedStream, Error> {
         if h.flags.is_float() {
             return Err(Error::NotYetImplemented("32-bit float decode (M3)"));
         }
-        if h.flags.0 & Flags::INT32_DATA != 0 {
-            return Err(Error::NotYetImplemented("extended integer decode (M2)"));
-        }
-        if h.flags.bytes_per_sample() != 2 {
-            return Err(Error::NotYetImplemented("non-16-bit integer decode (M2)"));
+        if h.flags.bytes_per_sample() == 1 {
+            return Err(Error::NotYetImplemented("8-bit integer decode"));
         }
 
         let samples = decode_block(&block)?;
@@ -88,6 +85,8 @@ fn decode_block(block: &crate::block::Block<'_>) -> Result<Vec<i32>, Error> {
     let mut passes: Option<Vec<DecorrPass>> = None;
     let mut words: Option<WordsDecoder> = None;
     let mut wv_payload: Option<&[u8]> = None;
+    let mut int32_info: Option<[u8; 4]> = None;
+    let mut wvx: Option<(&[u8], bool)> = None; // (payload incl. crc, new format)
 
     for sub in block.sub_blocks() {
         let sub = sub?;
@@ -110,6 +109,15 @@ fn decode_block(block: &crate::block::Block<'_>) -> Result<Vec<i32>, Error> {
                 words = Some(WordsDecoder::from_entropy_vars(sub.data, mono_data)?)
             }
             meta::WV_BITSTREAM => wv_payload = Some(sub.data),
+            meta::INT32_INFO => {
+                let b: [u8; 4] = sub
+                    .data
+                    .try_into()
+                    .map_err(|_| Error::BadSubBlock { id: sub.id })?;
+                int32_info = Some(b);
+            }
+            meta::WVX_BITSTREAM => wvx = Some((sub.data, false)),
+            meta::WVX_NEW_BITSTREAM => wvx = Some((sub.data, true)),
             _ => {}
         }
     }
@@ -176,8 +184,90 @@ fn decode_block(block: &crate::block::Block<'_>) -> Result<Vec<i32>, Error> {
         });
     }
 
-    // Lossless fixup: only the final left-shift applies on this path.
-    let shift = flags.output_shift();
+    // Fixup, per the reference's lossless path: extended-integer restoration
+    // (with the wvx extension bits when present), then the final left-shift.
+    let mut shift = flags.output_shift();
+
+    if flags.0 & Flags::INT32_DATA != 0 {
+        let info = int32_info.ok_or(Error::MissingSubBlock("int32 info"))?;
+        let sent_bits = u32::from(info[0]) & 0x1f;
+        let zeros = u32::from(info[1]) & 0x1f;
+        let ones = u32::from(info[2]) & 0x1f;
+        let dups = u32::from(info[3]) & 0x1f;
+
+        if let Some((payload, is_new)) = wvx {
+            // First four bytes are the stored CRC of the restored samples.
+            if payload.len() <= 4 || payload.len() % 2 != 0 {
+                return Err(Error::BadSubBlock { id: meta::WVX_BITSTREAM });
+            }
+            let crc_wvx = u32::from_le_bytes(payload[0..4].try_into().expect("checked"));
+            let mut xbits = BitReader::new(&payload[4..]);
+            let max_width = if is_new { xbits.getbits(5) & 0x1f } else { 0 };
+
+            let mask = (1u32 << sent_bits) - 1;
+            let mut crc_x: u32 = 0xffffffff;
+            for v in buffer.iter_mut() {
+                if sent_bits != 0 {
+                    if max_width != 0 {
+                        let pvalue = if *v < 0 { !*v } else { *v } as u32;
+                        let vbits = if pvalue == 0 { 0 } else { 32 - pvalue.leading_zeros() };
+                        let width = vbits + sent_bits;
+                        let bits_to_read = if width <= max_width {
+                            sent_bits as i32
+                        } else {
+                            sent_bits as i32 - (width - max_width) as i32
+                        };
+                        if bits_to_read > 0 {
+                            let n = bits_to_read as u32;
+                            let data = xbits.getbits(n) & ((1u32 << n) - 1);
+                            *v = ((((*v as u32) << n) | data) << (sent_bits - n)) as i32;
+                        } else {
+                            *v = ((*v as u32) << sent_bits) as i32;
+                        }
+                    } else {
+                        let data = xbits.getbits(sent_bits) & mask;
+                        *v = (((*v as u32) << sent_bits) | data) as i32;
+                    }
+                }
+                if zeros != 0 {
+                    *v = ((*v as u32) << zeros) as i32;
+                } else if ones != 0 {
+                    *v = ((((*v as u32).wrapping_add(1)) << ones).wrapping_sub(1)) as i32;
+                } else if dups != 0 {
+                    let low = (*v as u32) & 1;
+                    *v = ((((*v as u32).wrapping_add(low)) << dups).wrapping_sub(low)) as i32;
+                }
+                crc_x = crc_x
+                    .wrapping_mul(9)
+                    .wrapping_add(((*v as u32) & 0xffff).wrapping_mul(3))
+                    .wrapping_add(((*v as u32) >> 16) & 0xffff);
+            }
+            if xbits.errored() {
+                return Err(Error::Truncated { need: 1, have: 0 });
+            }
+            if crc_x != crc_wvx {
+                return Err(Error::CrcMismatch {
+                    stored: crc_wvx,
+                    computed: crc_x,
+                });
+            }
+        } else if sent_bits == 0 && (zeros + ones + dups) != 0 {
+            for v in buffer.iter_mut() {
+                if zeros != 0 {
+                    *v = ((*v as u32) << zeros) as i32;
+                } else if ones != 0 {
+                    *v = ((((*v as u32).wrapping_add(1)) << ones).wrapping_sub(1)) as i32;
+                } else if dups != 0 {
+                    let low = (*v as u32) & 1;
+                    *v = ((((*v as u32).wrapping_add(low)) << dups).wrapping_sub(low)) as i32;
+                }
+            }
+        } else {
+            shift += zeros + sent_bits + ones + dups;
+        }
+    }
+
+    let shift = shift & 0x1f;
     if shift != 0 {
         for s in buffer.iter_mut() {
             *s = ((*s as u32) << shift) as i32;

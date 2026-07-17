@@ -9,12 +9,12 @@
 //! wasm-capable. Out of scope: DSD, hybrid/lossy modes, correction files,
 //! more than two channels, pre-4.0 legacy streams.
 //!
-//! **Status: M1 (16-bit integer decode).** Lossless decode of 16-bit mono and
-//! stereo streams (joint stereo, false stereo, zero-run silence, multiblock)
-//! is implemented and verified sample-for-sample against the reference
-//! `wvunpack -r` over the fixture corpus, with block CRCs enforced as hard
-//! errors. Block parsing and scope gates landed at M0. Not yet implemented:
-//! 24/32-bit integers (M2), float (M3), and the encoder (M4+). The founding
+//! **Status: M2 (integer decode complete).** Lossless decode of 16/24/32-bit
+//! mono and stereo streams (joint stereo, false stereo, zero-run silence,
+//! multiblock, and the wvx extension for >24-bit) is verified sample-for-sample
+//! against the reference wvunpack -r, with both CRCs enforced as hard errors.
+//! Block parsing and scope gates landed at M0. Not yet implemented:
+//! float (M3) and the encoder (M4+). The founding
 //! plan, milestone ladder, and conformance-oracle method live in the
 //! repository's `design_docs/`.
 

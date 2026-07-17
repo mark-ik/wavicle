@@ -87,6 +87,7 @@ const LOSSLESS_FIXTURES: &[&str] = &[
     "int16_stereo",
     "int24_stereo",
     "int32_stereo",
+    "int32_shifted_mono",
     "f32_mono",
     "f32_stereo",
     "false_stereo",
@@ -139,28 +140,42 @@ fn single_block_fixtures_scan_as_one_block() {
     assert_eq!(StreamInfo::scan(&wv).expect("scan").block_count, 1);
 }
 
-/// M1 gate: our lossless decode must equal `wvunpack -r` output exactly for
-/// every 16-bit fixture. The goldens are the reference's own raw decode
-/// (native-width little-endian interleaved), compared at the typed-sample
-/// level.
+/// M1+M2 gate: our lossless decode must equal `wvunpack -r` output exactly
+/// for every integer fixture. The goldens are the reference's own raw decode
+/// (native-width little-endian interleaved: 2-byte for 16-bit, 3-byte packed
+/// for 24-bit, 4-byte for 32-bit), compared at the typed-sample level.
 #[test]
-fn decode_matches_reference_raw_output_for_every_int16_fixture() {
-    let names = [
-        "int16_mono",
-        "int16_stereo",
-        "false_stereo",
-        "silence_stereo",
-        "multiblock_int16_mono",
+fn decode_matches_reference_raw_output_for_every_int_fixture() {
+    let cases: &[(&str, usize)] = &[
+        ("int16_mono", 2),
+        ("int16_stereo", 2),
+        ("false_stereo", 2),
+        ("silence_stereo", 2),
+        ("multiblock_int16_mono", 2),
+        ("int24_stereo", 3),
+        ("int32_stereo", 4),
+        ("int32_shifted_mono", 4),
     ];
-    for name in names {
+    for &(name, bytes) in cases {
         let (wv, _) = fixture(name);
         let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
         let golden_bytes =
             std::fs::read(dir.join(format!("{name}.decoded.raw"))).expect("decode golden");
-        let golden: Vec<i32> = golden_bytes
-            .chunks_exact(2)
-            .map(|b| i32::from(i16::from_le_bytes([b[0], b[1]])))
-            .collect();
+        let golden: Vec<i32> = match bytes {
+            2 => golden_bytes
+                .chunks_exact(2)
+                .map(|b| i32::from(i16::from_le_bytes([b[0], b[1]])))
+                .collect(),
+            3 => golden_bytes
+                .chunks_exact(3)
+                .map(|b| i32::from_le_bytes([b[0], b[1], b[2], 0]) << 8 >> 8)
+                .collect(),
+            4 => golden_bytes
+                .chunks_exact(4)
+                .map(|b| i32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+                .collect(),
+            _ => unreachable!(),
+        };
 
         let decoded =
             wavicle::decode_stream(&wv).unwrap_or_else(|e| panic!("{name}: decode failed: {e}"));

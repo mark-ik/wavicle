@@ -13,7 +13,7 @@ the conformance oracle), read from copies kept outside this repo.
 | `bitstream` | `wavpack_local.h` getbit/getbits macros, `open_utils.c` bs_open_read, `read_words.c` read_code and the unary/escape reads | M1; portable variant, not the CTZ/NEXT8 optimizations |
 | `entropy` | `read_words.c` get_words_lossless, `entropy_utils.c` wp_exp2s + exp2 table, median macros in `wavpack_local.h` | M1; lossless path only |
 | `decorr` | `decorr_utils.c` read_decorr_* + restore_weight, `unpack.c` decorr_mono_pass/decorr_stereo_pass, weight macros in `wavpack_local.h` | M1; inverse only |
-| `decode` driver | `unpack.c` unpack_samples (shape, joint stereo, CRC, fixup lossless path) | M1; hard-errors where the reference mutes |
+| `decode` driver | `unpack.c` unpack_samples (shape, joint stereo, CRC, fixup lossless path incl. the INT32_DATA restoration), `open_utils.c` init_wvx_bitstream + read_int32_info | M1+M2; hard-errors where the reference mutes |
 
 Planned lineage for later milestones:
 
