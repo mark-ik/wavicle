@@ -9,8 +9,18 @@
 //! wasm-capable. Out of scope: DSD, hybrid/lossy modes, correction files,
 //! more than two channels, pre-4.0 legacy streams.
 //!
-//! **Status: name claim.** No functionality yet. The founding plan, milestone
-//! ladder, and conformance-oracle method live in the repository's
-//! `design_docs/`.
+//! **Status: M0 (block parse).** The block header, metadata sub-block framing,
+//! scope gates, and a whole-stream [`StreamInfo`] scan are implemented and
+//! conformance-tested against reference-encoded fixtures. Sample decode is
+//! not implemented yet. The founding plan, milestone ladder, and
+//! conformance-oracle method live in the repository's `design_docs/`.
 
 #![forbid(unsafe_code)]
+
+pub mod block;
+pub mod error;
+pub mod format;
+pub mod metadata;
+
+pub use block::{Block, BlockHeader, Blocks, StreamInfo};
+pub use error::{Error, Scope};
