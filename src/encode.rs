@@ -22,6 +22,12 @@ use crate::block;
 const FIXED_TERM: i32 = 2;
 const FIXED_DELTA: i32 = 2;
 
+/// Frames per block. Well under the 131072-frame and 1 MB block limits even for
+/// worst-case incompressible stereo 32-bit data. Blocks are independent: each
+/// carries its own complete starting state, so the decoder needs no continuity
+/// between them. Long inputs split into several such blocks.
+const BLOCK_FRAMES: usize = 32768;
+
 /// Parameters describing the integer PCM to encode.
 #[derive(Clone, Copy, Debug)]
 pub struct EncodeParams {
@@ -37,53 +43,70 @@ pub struct EncodeParams {
 /// `samples` holds sign-extended `i32` values (`channels * frames` of them),
 /// each fitting in `bits_per_sample`.
 pub fn encode_int(params: EncodeParams, samples: &[i32]) -> Result<Vec<u8>, Error> {
-    let (mono, frames, srate_index) = prepare(params.channels, params.sample_rate, samples.len())?;
+    let (mono, total_frames, srate_index) = prepare(params.channels, params.sample_rate, samples.len())?;
     if !matches!(params.bits_per_sample, 8 | 16 | 24 | 32) {
         return Err(Error::NotYetImplemented("bit depth must be 8, 16, 24, or 32"));
     }
     let bytes_per_sample = params.bits_per_sample / 8;
-    let magnitude = magnitude_of(samples)?;
+    let channels = params.channels as usize;
 
-    let flags = base_flags(mono, bytes_per_sample, magnitude, srate_index);
-    Ok(assemble_block(mono, flags, samples, frames, None, None))
-}
-
-/// Encode interleaved 32-bit float `samples` (`channels * frames`) to a
-/// single-block `.wv` stream, bit-exact and losslessly.
-pub fn encode_float(channels: u32, sample_rate: u32, samples: &[f32]) -> Result<Vec<u8>, Error> {
-    let (mono, frames, srate_index) = prepare(channels, sample_rate, samples.len())?;
-
-    let bits: Vec<u32> = samples.iter().map(|f| f.to_bits()).collect();
-    let scan = scan_float_data(&bits);
-    if scan.magnitude > 31 {
-        return Err(Error::OverMagnitude);
+    let mut out = Vec::new();
+    let mut block_index: u64 = 0;
+    for chunk in samples.chunks(BLOCK_FRAMES * channels) {
+        let block_frames = (chunk.len() / channels) as u32;
+        let magnitude = magnitude_of(chunk)?;
+        let flags = base_flags(mono, bytes_per_sample, magnitude, srate_index);
+        assemble_block(
+            &mut out, mono, flags, chunk, block_index, block_frames, total_frames, None, None,
+        );
+        block_index += u64::from(block_frames);
     }
-
-    let mut flags = base_flags(mono, 4, scan.magnitude, srate_index);
-    flags |= Flags::FLOAT_DATA;
-
-    let float_info = [scan.flags, scan.shift, scan.max_exp, 127];
-
-    let wvx = if scan.needs_wvx {
-        let mut bw = BitWriter::new();
-        send_float_data(&bits, scan.flags, scan.max_exp, &mut bw);
-        Some((scan.crc_x, bw.close()))
-    } else {
-        None
-    };
-
-    Ok(assemble_block(
-        mono,
-        flags,
-        &scan.ints,
-        frames,
-        Some(float_info),
-        wvx.as_ref().map(|(c, b)| (*c, b.as_slice())),
-    ))
+    Ok(out)
 }
 
-/// Validate channel/rate/length and return `(mono, frames, srate_index)`.
-fn prepare(channels: u32, sample_rate: u32, len: usize) -> Result<(bool, u32, u32), Error> {
+/// Encode interleaved 32-bit float `samples` (`channels * frames`) to a `.wv`
+/// stream, bit-exact and losslessly. Splits into blocks for long inputs.
+pub fn encode_float(channels: u32, sample_rate: u32, samples: &[f32]) -> Result<Vec<u8>, Error> {
+    let (mono, total_frames, srate_index) = prepare(channels, sample_rate, samples.len())?;
+    let ch = channels as usize;
+
+    let mut out = Vec::new();
+    let mut block_index: u64 = 0;
+    for chunk in samples.chunks(BLOCK_FRAMES * ch) {
+        let block_frames = (chunk.len() / ch) as u32;
+        let bits: Vec<u32> = chunk.iter().map(|f| f.to_bits()).collect();
+        let scan = scan_float_data(&bits);
+        if scan.magnitude > 31 {
+            return Err(Error::OverMagnitude);
+        }
+        let mut flags = base_flags(mono, 4, scan.magnitude, srate_index);
+        flags |= Flags::FLOAT_DATA;
+        let float_info = [scan.flags, scan.shift, scan.max_exp, 127];
+        let wvx = if scan.needs_wvx {
+            let mut bw = BitWriter::new();
+            send_float_data(&bits, scan.flags, scan.max_exp, &mut bw);
+            Some((scan.crc_x, bw.close()))
+        } else {
+            None
+        };
+        assemble_block(
+            &mut out,
+            mono,
+            flags,
+            &scan.ints,
+            block_index,
+            block_frames,
+            total_frames,
+            Some(float_info),
+            wvx.as_ref().map(|(c, b)| (*c, b.as_slice())),
+        );
+        block_index += u64::from(block_frames);
+    }
+    Ok(out)
+}
+
+/// Validate channel/rate/length and return `(mono, total_frames, srate_index)`.
+fn prepare(channels: u32, sample_rate: u32, len: usize) -> Result<(bool, u64, u32), Error> {
     if channels != 1 && channels != 2 {
         return Err(Error::OutOfScope(Scope::MoreThanTwoChannels));
     }
@@ -97,13 +120,7 @@ fn prepare(channels: u32, sample_rate: u32, len: usize) -> Result<(bool, u32, u3
             have: len,
         });
     }
-    let frames = (len / channels as usize) as u32;
-    if frames > format::MAX_BLOCK_SAMPLES {
-        return Err(Error::NotYetImplemented(
-            "multi-block encode (over 131072 frames)",
-        ));
-    }
-    Ok((channels == 1, frames, srate_index))
+    Ok((channels == 1, (len / channels as usize) as u64, srate_index))
 }
 
 /// The actual max magnitude of integer data, like the reference (the OR of
@@ -132,16 +149,20 @@ fn base_flags(mono: bool, bytes_per_sample: u32, magnitude: u32, srate_index: u3
 }
 
 /// Compute the block CRC over `ints`, forward-decorrelate a copy with the fixed
-/// term, entropy-encode the residuals, and assemble the block with its metadata
-/// (optionally including float info and a wvx sub-block).
+/// term, entropy-encode the residuals, and append the finished block (header +
+/// metadata) to `out`. `float_info` and `wvx` are per-block.
+#[allow(clippy::too_many_arguments)]
 fn assemble_block(
+    out: &mut Vec<u8>,
     mono: bool,
     flags: u32,
     ints: &[i32],
-    frames: u32,
+    block_index: u64,
+    block_frames: u32,
+    total_frames: u64,
     float_info: Option<[u8; 4]>,
     wvx: Option<(u32, &[u8])>,
-) -> Vec<u8> {
+) {
     // Block CRC over the integers (== decoder's CRC over the reconstructed
     // integers before any float expansion): seed 0xffffffff.
     let mut crc: u32 = 0xffffffff;
@@ -174,7 +195,7 @@ fn assemble_block(
 
     let mut words = WordsEncoder::new();
     let mut bw = BitWriter::new();
-    words.send_words_lossless(&mut bw, &residuals, frames, mono);
+    words.send_words_lossless(&mut bw, &residuals, block_frames, mono);
     words.finish(&mut bw);
     let wv = bw.close();
 
@@ -197,21 +218,30 @@ fn assemble_block(
     }
 
     let ck_size = (block::HEADER_LEN - 8 + m.len()) as u32;
-    let mut out = Vec::with_capacity(block::HEADER_LEN + m.len());
-    write_header(&mut out, ck_size, frames, flags, crc);
+    out.reserve(block::HEADER_LEN + m.len());
+    write_header(out, ck_size, block_index, block_frames, total_frames, flags, crc);
     out.extend_from_slice(&m);
-    out
 }
 
-fn write_header(out: &mut Vec<u8>, ck_size: u32, frames: u32, flags: u32, crc: u32) {
+fn write_header(
+    out: &mut Vec<u8>,
+    ck_size: u32,
+    block_index: u64,
+    block_frames: u32,
+    total_frames: u64,
+    flags: u32,
+    crc: u32,
+) {
     out.extend_from_slice(&format::MAGIC);
     out.extend_from_slice(&ck_size.to_le_bytes());
     out.extend_from_slice(&format::MAX_STREAM_VERS.to_le_bytes()); // 0x410
-    out.push(0); // block_index high byte
-    out.push(0); // total_samples high byte
-    out.extend_from_slice(&frames.to_le_bytes()); // total_samples (block_index == 0)
-    out.extend_from_slice(&0u32.to_le_bytes()); // block_index
-    out.extend_from_slice(&frames.to_le_bytes()); // block_samples
+    out.push((block_index >> 32) as u8); // block_index high byte (40-bit)
+    out.push((total_frames >> 32) as u8); // total_samples high byte (40-bit)
+    // total_samples is defined only on the first block; later blocks carry it
+    // too and decoders ignore it there.
+    out.extend_from_slice(&(total_frames as u32).to_le_bytes());
+    out.extend_from_slice(&(block_index as u32).to_le_bytes());
+    out.extend_from_slice(&block_frames.to_le_bytes());
     out.extend_from_slice(&flags.to_le_bytes());
     out.extend_from_slice(&crc.to_le_bytes());
 }

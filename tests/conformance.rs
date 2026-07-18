@@ -451,6 +451,70 @@ fn float_encode_round_trips_bit_exact_with_blake3_identity() {
     }
 }
 
+/// Multi-block gate. Inputs longer than one block must split into several
+/// contiguous blocks that round-trip losslessly through our own decoder and
+/// the reference `wvunpack`, for both integer and float.
+#[cfg(feature = "encode")]
+#[test]
+fn long_inputs_split_into_blocks_and_round_trip() {
+    use wavicle::{EncodeParams, encode_float, encode_int};
+
+    // ~2.5 blocks at 32768 frames/block.
+    let n = 80_000usize;
+    let int_samples: Vec<i32> = (0..n)
+        .map(|i| ((4000.0 * (i as f64 * 0.02).sin()) as i32))
+        .collect();
+    let float_samples: Vec<f32> = (0..n)
+        .map(|i| (0.6 * (i as f64 * 0.02).sin()) as f32)
+        .collect();
+
+    let tool = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../testing/wavicle/tools/wvunpack.exe");
+    let have_ref = tool.exists();
+
+    let reference_raw = |wv: &[u8], name: &str, bytes: usize| -> Vec<u8> {
+        let dir = std::env::temp_dir();
+        let wv_path = dir.join(format!("wavicle_mb_{name}.wv"));
+        let raw_path = dir.join(format!("wavicle_mb_{name}.raw"));
+        std::fs::write(&wv_path, wv).unwrap();
+        let ok = std::process::Command::new(&tool)
+            .args(["-r", "-y", "-q"]).arg(&wv_path).arg("-o").arg(&raw_path)
+            .status().expect("run wvunpack").success();
+        assert!(ok, "{name}: wvunpack rejected multi-block stream");
+        let raw = std::fs::read(&raw_path).unwrap();
+        let _ = std::fs::remove_file(&wv_path);
+        let _ = std::fs::remove_file(&raw_path);
+        let _ = bytes;
+        raw
+    };
+
+    // Integer, mono, 16-bit.
+    let params = EncodeParams { channels: 1, sample_rate: 48000, bits_per_sample: 16 };
+    let wv = encode_int(params, &int_samples).unwrap();
+    let info = wavicle::StreamInfo::scan(&wv).unwrap();
+    assert!(info.block_count >= 3, "expected multiple blocks, got {}", info.block_count);
+    assert_eq!(info.total_samples, Some(n as u64));
+    assert_eq!(wavicle::decode_stream(&wv).unwrap().samples, int_samples);
+    if have_ref {
+        let raw = reference_raw(&wv, "int16", 2);
+        let ref_s: Vec<i32> = raw.chunks_exact(2).map(|b| i32::from(i16::from_le_bytes([b[0], b[1]]))).collect();
+        assert_eq!(ref_s, int_samples, "int16 multi-block reference mismatch");
+    }
+
+    // Float, mono.
+    let wv = encode_float(1, 48000, &float_samples).unwrap();
+    let info = wavicle::StreamInfo::scan(&wv).unwrap();
+    assert!(info.block_count >= 3, "float: expected multiple blocks, got {}", info.block_count);
+    let want_bits: Vec<u32> = float_samples.iter().map(|f| f.to_bits()).collect();
+    let got_bits: Vec<u32> = wavicle::decode_stream(&wv).unwrap().samples.iter().map(|&s| s as u32).collect();
+    assert_eq!(got_bits, want_bits, "float multi-block self round-trip");
+    if have_ref {
+        let raw = reference_raw(&wv, "f32", 4);
+        let ref_bits: Vec<u32> = raw.chunks_exact(4).map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]])).collect();
+        assert_eq!(ref_bits, want_bits, "float multi-block reference mismatch");
+    }
+}
+
 /// A corrupted payload must fail with a CRC error, never decode silently.
 #[test]
 fn corrupt_audio_fails_the_crc_hard() {

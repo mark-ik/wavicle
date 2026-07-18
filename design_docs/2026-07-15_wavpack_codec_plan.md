@@ -512,3 +512,17 @@ that step:
   (project_store media .wav -> .wv). Decorrelation is still a single fixed term,
   so files are larger than the reference's; a format-compatible compression
   follow-on, not a correctness gap.
+- 2026-07-15: **Multi-block encode landed.** Long inputs (over 32768 frames)
+  now split into independent blocks: each block carries its own complete
+  starting state (zero medians, zero decorrelation), so the decoder needs no
+  cross-block continuity, which keeps the encoder simple and definitely
+  correct. Block size 32768 frames stays well under the 131072-frame and 1 MB
+  block limits. The header now carries the running block_index and the file
+  total_samples (on every block; decoders read it from block 0). Per-block
+  re-adaptation overhead is negligible because large residuals are compactly
+  escape-coded, not emitted as literal unary runs. Gate: 80000-frame integer
+  and float inputs split into 3 contiguous blocks and round-trip losslessly
+  through our own decoder and the reference `wvunpack`. The encoder now
+  handles inputs of any length. The only remaining step before wavicle can
+  back Hocket media is M6 (project_store .wav -> .wv wiring); the codec itself
+  is feature-complete for the tiny profile.

@@ -17,9 +17,9 @@
 //! default build; [`encode_int`] and [`encode_float`] are behind the `encode`
 //! feature and use a single fixed decorrelation term (a valid lossless choice;
 //! smaller files via better decorrelation are a later, format-compatible
-//! improvement). Remaining: multi-block encode for long files, and the Hocket
-//! integration. The founding plan and conformance-oracle method live in the
-//! repository's `design_docs/`.
+//! improvement). Inputs of any length are supported: the encoder splits long
+//! data into independent blocks. The founding plan and conformance-oracle
+//! method live in the repository's `design_docs/`.
 
 #![forbid(unsafe_code)]
 
