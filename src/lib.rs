@@ -47,8 +47,8 @@ pub mod decode;
 pub mod encode;
 
 pub use block::{Block, BlockHeader, Blocks, StreamInfo};
-pub use error::{Error, Scope};
 #[cfg(feature = "decode")]
 pub use decode::{DecodedStream, decode_stream};
 #[cfg(feature = "encode")]
 pub use encode::{EncodeParams, encode_float, encode_int};
+pub use error::{Error, Scope};

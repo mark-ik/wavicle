@@ -82,6 +82,36 @@ fn fixture(name: &str) -> (Vec<u8>, String) {
     (wv, ss)
 }
 
+/// Locate a reference CLI tool (`wvunpack` / `wavpack`): the pinned local
+/// checkout used in dev, else on `PATH` (CI installs the `wavpack` package).
+/// Returns a path whose `.exists()` is false when the tool is unavailable, so
+/// callers can gate on `tool.exists()` and skip the reference legs.
+#[allow(dead_code)]
+fn reference_tool(name: &str) -> std::path::PathBuf {
+    let exe = if cfg!(windows) {
+        format!("{name}.exe")
+    } else {
+        name.to_string()
+    };
+    let local = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../testing/wavicle/tools")
+        .join(&exe);
+    if local.exists() {
+        return local;
+    }
+    let finder = if cfg!(windows) { "where" } else { "which" };
+    if let Ok(out) = std::process::Command::new(finder).arg(name).output()
+        && out.status.success()
+        && let Some(line) = String::from_utf8_lossy(&out.stdout).lines().next()
+    {
+        let p = std::path::PathBuf::from(line.trim());
+        if p.exists() {
+            return p;
+        }
+    }
+    local // does not exist -> callers skip the reference leg
+}
+
 const LOSSLESS_FIXTURES: &[&str] = &[
     "int16_mono",
     "int16_stereo",
@@ -225,11 +255,7 @@ fn float_decode_is_bit_exact_and_blake3_stable() {
             .collect();
         assert_eq!(ours.len(), golden.len(), "{name}: byte length");
 
-        for (i, (a, b)) in ours
-            .chunks_exact(4)
-            .zip(golden.chunks_exact(4))
-            .enumerate()
-        {
+        for (i, (a, b)) in ours.chunks_exact(4).zip(golden.chunks_exact(4)).enumerate() {
             if a != b {
                 let ab = u32::from_le_bytes(a.try_into().unwrap());
                 let bb = u32::from_le_bytes(b.try_into().unwrap());
@@ -277,7 +303,11 @@ fn encode_round_trips_losslessly_through_ourselves_and_the_reference() {
     let max16 = (1 << 15) - 1;
     let max24 = (1 << 23) - 1;
     let cases = vec![
-        Case { name: "i16 mono tone", params: p(1, 48000, 16), samples: tone(4000, 48000, 220.0, 0.6, max16) },
+        Case {
+            name: "i16 mono tone",
+            params: p(1, 48000, 16),
+            samples: tone(4000, 48000, 220.0, 0.6, max16),
+        },
         Case {
             name: "i16 stereo",
             params: p(2, 44100, 16),
@@ -287,20 +317,41 @@ fn encode_round_trips_losslessly_through_ourselves_and_the_reference() {
                 l.iter().zip(&r).flat_map(|(a, b)| [*a, *b]).collect()
             },
         },
-        Case { name: "i16 silence", params: p(2, 48000, 16), samples: vec![0; 4000] },
-        Case { name: "i16 full scale", params: p(1, 48000, 16), samples: (0..2000).map(|i| if i % 2 == 0 { max16 } else { -max16 - 1 }).collect() },
-        Case { name: "i24 stereo", params: p(2, 48000, 24), samples: {
-            let l = tone(2000, 48000, 261.0, 0.7, max24);
-            let r = tone(2000, 48000, 392.0, 0.4, max24);
-            l.iter().zip(&r).flat_map(|(a, b)| [*a, *b]).collect()
-        }},
-        Case { name: "i32 mono", params: p(1, 48000, 32), samples: tone(2000, 48000, 174.0, 0.5, 1 << 23) },
-        Case { name: "i16 ramp mono", params: p(1, 48000, 16), samples: (0..2000).map(|i| ((i as i32 * 17) % 65535) - 32768).collect() },
+        Case {
+            name: "i16 silence",
+            params: p(2, 48000, 16),
+            samples: vec![0; 4000],
+        },
+        Case {
+            name: "i16 full scale",
+            params: p(1, 48000, 16),
+            samples: (0..2000)
+                .map(|i| if i % 2 == 0 { max16 } else { -max16 - 1 })
+                .collect(),
+        },
+        Case {
+            name: "i24 stereo",
+            params: p(2, 48000, 24),
+            samples: {
+                let l = tone(2000, 48000, 261.0, 0.7, max24);
+                let r = tone(2000, 48000, 392.0, 0.4, max24);
+                l.iter().zip(&r).flat_map(|(a, b)| [*a, *b]).collect()
+            },
+        },
+        Case {
+            name: "i32 mono",
+            params: p(1, 48000, 32),
+            samples: tone(2000, 48000, 174.0, 0.5, 1 << 23),
+        },
+        Case {
+            name: "i16 ramp mono",
+            params: p(1, 48000, 16),
+            samples: (0..2000).map(|i| ((i * 17) % 65535) - 32768).collect(),
+        },
     ];
 
     // Locate the pinned reference wvunpack, if present.
-    let tool = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../testing/wavicle/tools/wvunpack.exe");
+    let tool = reference_tool("wvunpack");
     let have_ref = tool.exists();
     let mut ref_checked = 0;
 
@@ -330,7 +381,11 @@ fn encode_round_trips_losslessly_through_ourselves_and_the_reference() {
                 .arg(&raw_path)
                 .status()
                 .expect("run wvunpack");
-            assert!(status.success(), "{}: wvunpack rejected our stream", case.name);
+            assert!(
+                status.success(),
+                "{}: wvunpack rejected our stream",
+                case.name
+            );
             let raw = std::fs::read(&raw_path).unwrap();
             let bytes = (case.params.bits_per_sample / 8) as usize;
             let ref_samples: Vec<i32> = raw
@@ -354,7 +409,11 @@ fn encode_round_trips_losslessly_through_ourselves_and_the_reference() {
     }
 
     if have_ref {
-        assert_eq!(ref_checked, cases.len(), "all cases should hit the reference");
+        assert_eq!(
+            ref_checked,
+            cases.len(),
+            "all cases should hit the reference"
+        );
     } else {
         eprintln!("note: reference wvunpack absent; ran self round-trip only");
     }
@@ -372,7 +431,9 @@ fn float_encode_round_trips_bit_exact_with_blake3_identity() {
 
     fn tone(n: usize, rate: u32, freq: f64, amp: f64) -> Vec<f32> {
         (0..n)
-            .map(|i| (amp * (2.0 * std::f64::consts::PI * freq * i as f64 / rate as f64).sin()) as f32)
+            .map(|i| {
+                (amp * (2.0 * std::f64::consts::PI * freq * i as f64 / rate as f64).sin()) as f32
+            })
             .collect()
     }
 
@@ -387,9 +448,19 @@ fn float_encode_round_trips_bit_exact_with_blake3_identity() {
     }
     specials.extend(tone(240, 48000, 55.0, 0.02));
 
-    struct Case { name: &'static str, channels: u32, rate: u32, samples: Vec<f32> }
+    struct Case {
+        name: &'static str,
+        channels: u32,
+        rate: u32,
+        samples: Vec<f32>,
+    }
     let cases = vec![
-        Case { name: "f32 mono", channels: 1, rate: 48000, samples: tone(4000, 48000, 220.0, 0.6) },
+        Case {
+            name: "f32 mono",
+            channels: 1,
+            rate: 48000,
+            samples: tone(4000, 48000, 220.0, 0.6),
+        },
         Case {
             name: "f32 stereo",
             channels: 2,
@@ -400,12 +471,21 @@ fn float_encode_round_trips_bit_exact_with_blake3_identity() {
                 l.iter().zip(&r).flat_map(|(a, b)| [*a, *b]).collect()
             },
         },
-        Case { name: "f32 specials", channels: 1, rate: 48000, samples: specials },
-        Case { name: "f32 silence", channels: 2, rate: 44100, samples: vec![0.0; 4000] },
+        Case {
+            name: "f32 specials",
+            channels: 1,
+            rate: 48000,
+            samples: specials,
+        },
+        Case {
+            name: "f32 silence",
+            channels: 2,
+            rate: 44100,
+            samples: vec![0.0; 4000],
+        },
     ];
 
-    let tool = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../testing/wavicle/tools/wvunpack.exe");
+    let tool = reference_tool("wvunpack");
     let have_ref = tool.exists();
 
     for case in &cases {
@@ -419,13 +499,22 @@ fn float_encode_round_trips_bit_exact_with_blake3_identity() {
         assert!(decoded.is_float, "{}: float flag", case.name);
         let got_bits: Vec<u32> = decoded.samples.iter().map(|&s| s as u32).collect();
         for (i, (a, b)) in got_bits.iter().zip(&want_bits).enumerate() {
-            assert_eq!(a, b, "{}: self round-trip sample {i}: {a:#010x} vs {b:#010x}", case.name);
+            assert_eq!(
+                a, b,
+                "{}: self round-trip sample {i}: {a:#010x} vs {b:#010x}",
+                case.name
+            );
         }
 
         // BLAKE3 identity over the decoded f32 LE bytes.
         let want_bytes: Vec<u8> = want_bits.iter().flat_map(|b| b.to_le_bytes()).collect();
         let got_bytes: Vec<u8> = got_bits.iter().flat_map(|b| b.to_le_bytes()).collect();
-        assert_eq!(blake3::hash(&got_bytes), blake3::hash(&want_bytes), "{}: BLAKE3", case.name);
+        assert_eq!(
+            blake3::hash(&got_bytes),
+            blake3::hash(&want_bytes),
+            "{}: BLAKE3",
+            case.name
+        );
 
         // Reference round-trip.
         if have_ref {
@@ -434,16 +523,28 @@ fn float_encode_round_trips_bit_exact_with_blake3_identity() {
             let raw_path = dir.join(format!("wavicle_m5_{}.raw", case.name.replace(' ', "_")));
             std::fs::write(&wv_path, &wv).unwrap();
             let status = std::process::Command::new(&tool)
-                .args(["-r", "-y", "-q"]).arg(&wv_path).arg("-o").arg(&raw_path)
-                .status().expect("run wvunpack");
-            assert!(status.success(), "{}: wvunpack rejected our float stream", case.name);
+                .args(["-r", "-y", "-q"])
+                .arg(&wv_path)
+                .arg("-o")
+                .arg(&raw_path)
+                .status()
+                .expect("run wvunpack");
+            assert!(
+                status.success(),
+                "{}: wvunpack rejected our float stream",
+                case.name
+            );
             let raw = std::fs::read(&raw_path).unwrap();
             let ref_bits: Vec<u32> = raw
                 .chunks_exact(4)
                 .map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
                 .collect();
             for (i, (a, b)) in ref_bits.iter().zip(&want_bits).enumerate() {
-                assert_eq!(a, b, "{}: reference sample {i}: {a:#010x} vs {b:#010x}", case.name);
+                assert_eq!(
+                    a, b,
+                    "{}: reference sample {i}: {a:#010x} vs {b:#010x}",
+                    case.name
+                );
             }
             let _ = std::fs::remove_file(&wv_path);
             let _ = std::fs::remove_file(&raw_path);
@@ -462,14 +563,13 @@ fn long_inputs_split_into_blocks_and_round_trip() {
     // ~2.5 blocks at 32768 frames/block.
     let n = 80_000usize;
     let int_samples: Vec<i32> = (0..n)
-        .map(|i| ((4000.0 * (i as f64 * 0.02).sin()) as i32))
+        .map(|i| (4000.0 * (i as f64 * 0.02).sin()) as i32)
         .collect();
     let float_samples: Vec<f32> = (0..n)
         .map(|i| (0.6 * (i as f64 * 0.02).sin()) as f32)
         .collect();
 
-    let tool = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../testing/wavicle/tools/wvunpack.exe");
+    let tool = reference_tool("wvunpack");
     let have_ref = tool.exists();
 
     let reference_raw = |wv: &[u8], name: &str, bytes: usize| -> Vec<u8> {
@@ -478,8 +578,13 @@ fn long_inputs_split_into_blocks_and_round_trip() {
         let raw_path = dir.join(format!("wavicle_mb_{name}.raw"));
         std::fs::write(&wv_path, wv).unwrap();
         let ok = std::process::Command::new(&tool)
-            .args(["-r", "-y", "-q"]).arg(&wv_path).arg("-o").arg(&raw_path)
-            .status().expect("run wvunpack").success();
+            .args(["-r", "-y", "-q"])
+            .arg(&wv_path)
+            .arg("-o")
+            .arg(&raw_path)
+            .status()
+            .expect("run wvunpack")
+            .success();
         assert!(ok, "{name}: wvunpack rejected multi-block stream");
         let raw = std::fs::read(&raw_path).unwrap();
         let _ = std::fs::remove_file(&wv_path);
@@ -489,28 +594,51 @@ fn long_inputs_split_into_blocks_and_round_trip() {
     };
 
     // Integer, mono, 16-bit.
-    let params = EncodeParams { channels: 1, sample_rate: 48000, bits_per_sample: 16 };
+    let params = EncodeParams {
+        channels: 1,
+        sample_rate: 48000,
+        bits_per_sample: 16,
+    };
     let wv = encode_int(params, &int_samples).unwrap();
     let info = wavicle::StreamInfo::scan(&wv).unwrap();
-    assert!(info.block_count >= 3, "expected multiple blocks, got {}", info.block_count);
+    assert!(
+        info.block_count >= 3,
+        "expected multiple blocks, got {}",
+        info.block_count
+    );
     assert_eq!(info.total_samples, Some(n as u64));
     assert_eq!(wavicle::decode_stream(&wv).unwrap().samples, int_samples);
     if have_ref {
         let raw = reference_raw(&wv, "int16", 2);
-        let ref_s: Vec<i32> = raw.chunks_exact(2).map(|b| i32::from(i16::from_le_bytes([b[0], b[1]]))).collect();
+        let ref_s: Vec<i32> = raw
+            .chunks_exact(2)
+            .map(|b| i32::from(i16::from_le_bytes([b[0], b[1]])))
+            .collect();
         assert_eq!(ref_s, int_samples, "int16 multi-block reference mismatch");
     }
 
     // Float, mono.
     let wv = encode_float(1, 48000, &float_samples).unwrap();
     let info = wavicle::StreamInfo::scan(&wv).unwrap();
-    assert!(info.block_count >= 3, "float: expected multiple blocks, got {}", info.block_count);
+    assert!(
+        info.block_count >= 3,
+        "float: expected multiple blocks, got {}",
+        info.block_count
+    );
     let want_bits: Vec<u32> = float_samples.iter().map(|f| f.to_bits()).collect();
-    let got_bits: Vec<u32> = wavicle::decode_stream(&wv).unwrap().samples.iter().map(|&s| s as u32).collect();
+    let got_bits: Vec<u32> = wavicle::decode_stream(&wv)
+        .unwrap()
+        .samples
+        .iter()
+        .map(|&s| s as u32)
+        .collect();
     assert_eq!(got_bits, want_bits, "float multi-block self round-trip");
     if have_ref {
         let raw = reference_raw(&wv, "f32", 4);
-        let ref_bits: Vec<u32> = raw.chunks_exact(4).map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]])).collect();
+        let ref_bits: Vec<u32> = raw
+            .chunks_exact(4)
+            .map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+            .collect();
         assert_eq!(ref_bits, want_bits, "float multi-block reference mismatch");
     }
 }
@@ -523,13 +651,25 @@ fn non_standard_sample_rate_round_trips() {
     use wavicle::{EncodeParams, encode_float, encode_int};
 
     let rate = 37_800; // a real but non-table rate (old CD-ROM-XA)
-    let ints: Vec<i32> = (0..2000).map(|i| ((3000.0 * (i as f64 * 0.03).sin()) as i32)).collect();
-    let wv = encode_int(EncodeParams { channels: 1, sample_rate: rate, bits_per_sample: 16 }, &ints).unwrap();
+    let ints: Vec<i32> = (0..2000)
+        .map(|i| (3000.0 * (i as f64 * 0.03).sin()) as i32)
+        .collect();
+    let wv = encode_int(
+        EncodeParams {
+            channels: 1,
+            sample_rate: rate,
+            bits_per_sample: 16,
+        },
+        &ints,
+    )
+    .unwrap();
     let d = wavicle::decode_stream(&wv).unwrap();
     assert_eq!(d.sample_rate, rate, "int: custom rate must survive");
     assert_eq!(d.samples, ints);
 
-    let floats: Vec<f32> = (0..2000).map(|i| (0.5 * (i as f64 * 0.03).sin()) as f32).collect();
+    let floats: Vec<f32> = (0..2000)
+        .map(|i| (0.5 * (i as f64 * 0.03).sin()) as f32)
+        .collect();
     let wv = encode_float(1, rate, &floats).unwrap();
     let d = wavicle::decode_stream(&wv).unwrap();
     assert_eq!(d.sample_rate, rate, "float: custom rate must survive");
@@ -538,15 +678,21 @@ fn non_standard_sample_rate_round_trips() {
     assert_eq!(got, want);
 
     // And the reference agrees on the rate.
-    let tool = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../testing/wavicle/tools/wvunpack.exe");
+    let tool = reference_tool("wvunpack");
     if tool.exists() {
         let dir = std::env::temp_dir();
         let p = dir.join("wavicle_rate.wv");
         std::fs::write(&p, &wv).unwrap();
-        let out = std::process::Command::new(&tool).args(["-ss"]).arg(&p).output().unwrap();
+        let out = std::process::Command::new(&tool)
+            .args(["-ss"])
+            .arg(&p)
+            .output()
+            .unwrap();
         let ss = String::from_utf8_lossy(&out.stdout);
-        assert!(ss.contains("37800"), "wvunpack -ss should report 37800 Hz:\n{ss}");
+        assert!(
+            ss.contains("37800"),
+            "wvunpack -ss should report 37800 Hz:\n{ss}"
+        );
         let _ = std::fs::remove_file(&p);
     }
 }
@@ -579,15 +725,24 @@ fn encoded_size_is_reasonable_versus_raw_and_reference() {
     let raw_len = samples.len() * 4;
     let wv = encode_float(1, r, &samples).unwrap();
     // Must still be lossless.
-    let got: Vec<u32> = wavicle::decode_stream(&wv).unwrap().samples.iter().map(|&s| s as u32).collect();
+    let got: Vec<u32> = wavicle::decode_stream(&wv)
+        .unwrap()
+        .samples
+        .iter()
+        .map(|&s| s as u32)
+        .collect();
     let want: Vec<u32> = samples.iter().map(|f| f.to_bits()).collect();
     assert_eq!(got, want, "size test must stay lossless");
 
     // Beats raw comfortably.
-    assert!(wv.len() < raw_len * 9 / 10, "ours {} vs raw {}", wv.len(), raw_len);
+    assert!(
+        wv.len() < raw_len * 9 / 10,
+        "ours {} vs raw {}",
+        wv.len(),
+        raw_len
+    );
 
-    let tool = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../testing/wavicle/tools/wavpack.exe");
+    let tool = reference_tool("wavpack");
     if tool.exists() {
         let dir = std::env::temp_dir();
         let raw_path = dir.join("wavicle_size.raw");
@@ -596,20 +751,75 @@ fn encoded_size_is_reasonable_versus_raw_and_reference() {
         std::fs::write(&raw_path, &raw).unwrap();
         std::process::Command::new(&tool)
             .args([&format!("--raw-pcm={r},32f,1,le"), "-m", "-y", "-q"])
-            .arg(&raw_path).arg("-o").arg(&ref_wv)
-            .status().unwrap();
+            .arg(&raw_path)
+            .arg("-o")
+            .arg(&ref_wv)
+            .status()
+            .unwrap();
         let ref_len = std::fs::metadata(&ref_wv).unwrap().len() as usize;
         eprintln!(
             "SIZE: raw {raw_len}  wavicle {}  reference {ref_len}  (ours/ref = {:.2}x, ours/raw = {:.0}%)",
-            wv.len(), wv.len() as f64 / ref_len as f64, wv.len() as f64 / raw_len as f64 * 100.0
+            wv.len(),
+            wv.len() as f64 / ref_len as f64,
+            wv.len() as f64 / raw_len as f64 * 100.0
         );
         assert!(
             wv.len() < ref_len * 5 / 2,
             "ours {} should be within 2.5x reference {}",
-            wv.len(), ref_len
+            wv.len(),
+            ref_len
         );
         let _ = std::fs::remove_file(&raw_path);
         let _ = std::fs::remove_file(&ref_wv);
+    }
+}
+
+/// The decoder must never panic on arbitrary or corrupted input, only return
+/// an error. This is fuzzing-lite: seeded random buffers plus single-byte
+/// mutations of a real fixture. Deep fuzzing lives in `fuzz/`.
+#[test]
+fn decode_never_panics_on_arbitrary_or_mutated_bytes() {
+    let mut x: u64 = 0x9E37_79B9_7F4A_7C15;
+    let mut next = || {
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        x
+    };
+
+    // Pure random buffers of assorted lengths.
+    for _ in 0..2000 {
+        let len = (next() % 400) as usize;
+        let buf: Vec<u8> = (0..len).map(|_| (next() & 0xff) as u8).collect();
+        let _ = wavicle::decode_stream(&buf);
+        let _ = wavicle::StreamInfo::scan(&buf);
+    }
+
+    // Random buffers that begin with the wvpk magic, to drive deeper into the
+    // parser past the first gate.
+    for _ in 0..2000 {
+        let len = 32 + (next() % 400) as usize;
+        let mut buf: Vec<u8> = (0..len).map(|_| (next() & 0xff) as u8).collect();
+        buf[0..4].copy_from_slice(b"wvpk");
+        let _ = wavicle::decode_stream(&buf);
+        let _ = wavicle::StreamInfo::scan(&buf);
+    }
+
+    // Single- and double-byte mutations of a real stream.
+    let (valid, _) = fixture("f32_stereo");
+    for _ in 0..4000 {
+        let mut buf = valid.clone();
+        let i = (next() as usize) % buf.len();
+        buf[i] ^= (next() & 0xff) as u8;
+        let j = (next() as usize) % buf.len();
+        buf[j] = buf[j].wrapping_add(1);
+        let _ = wavicle::decode_stream(&buf);
+    }
+
+    // Truncations at every prefix length.
+    for len in 0..valid.len().min(2000) {
+        let _ = wavicle::decode_stream(&valid[..len]);
+        let _ = wavicle::StreamInfo::scan(&valid[..len]);
     }
 }
 
@@ -630,7 +840,7 @@ fn corrupt_audio_fails_the_crc_hard() {
 fn hybrid_stream_is_rejected_as_out_of_scope() {
     let (wv, ss) = fixture("hybrid_lossy_int16_stereo");
     assert!(
-        parse_golden(&ss).lossless == false,
+        !parse_golden(&ss).lossless,
         "golden confirms the fixture really is hybrid"
     );
     match StreamInfo::scan(&wv) {

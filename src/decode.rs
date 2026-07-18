@@ -78,9 +78,7 @@ fn custom_sample_rate(block: &crate::block::Block<'_>) -> Option<u32> {
     for sub in block.sub_blocks().flatten() {
         if sub.id == meta::SAMPLE_RATE && sub.data.len() >= 3 {
             return Some(
-                u32::from(sub.data[0])
-                    | u32::from(sub.data[1]) << 8
-                    | u32::from(sub.data[2]) << 16,
+                u32::from(sub.data[0]) | u32::from(sub.data[1]) << 8 | u32::from(sub.data[2]) << 16,
             );
         }
     }
@@ -206,7 +204,7 @@ fn decode_block(block: &crate::block::Block<'_>) -> Result<Vec<i32>, Error> {
         let info = float_info.ok_or(Error::MissingSubBlock("float info"))?;
         match wvx {
             Some((payload, is_new)) => {
-                if payload.len() <= 4 || payload.len() % 2 != 0 {
+                if payload.len() <= 4 || !payload.len().is_multiple_of(2) {
                     return Err(Error::BadSubBlock {
                         id: meta::WVX_BITSTREAM,
                     });
@@ -218,7 +216,14 @@ fn decode_block(block: &crate::block::Block<'_>) -> Result<Vec<i32>, Error> {
                 } else {
                     (0, 0)
                 };
-                let crc_x = float_values(&mut buffer, info, min_zeros, max_ones, &mut xbits, 0xffffffff);
+                let crc_x = float_values(
+                    &mut buffer,
+                    info,
+                    min_zeros,
+                    max_ones,
+                    &mut xbits,
+                    0xffffffff,
+                );
                 if xbits.errored() {
                     return Err(Error::Truncated { need: 1, have: 0 });
                 }
@@ -245,8 +250,10 @@ fn decode_block(block: &crate::block::Block<'_>) -> Result<Vec<i32>, Error> {
 
         if let Some((payload, is_new)) = wvx {
             // First four bytes are the stored CRC of the restored samples.
-            if payload.len() <= 4 || payload.len() % 2 != 0 {
-                return Err(Error::BadSubBlock { id: meta::WVX_BITSTREAM });
+            if payload.len() <= 4 || !payload.len().is_multiple_of(2) {
+                return Err(Error::BadSubBlock {
+                    id: meta::WVX_BITSTREAM,
+                });
             }
             let crc_wvx = u32::from_le_bytes(payload[0..4].try_into().expect("checked"));
             let mut xbits = BitReader::new(&payload[4..]);
@@ -258,7 +265,11 @@ fn decode_block(block: &crate::block::Block<'_>) -> Result<Vec<i32>, Error> {
                 if sent_bits != 0 {
                     if max_width != 0 {
                         let pvalue = if *v < 0 { !*v } else { *v } as u32;
-                        let vbits = if pvalue == 0 { 0 } else { 32 - pvalue.leading_zeros() };
+                        let vbits = if pvalue == 0 {
+                            0
+                        } else {
+                            32 - pvalue.leading_zeros()
+                        };
                         let width = vbits + sent_bits;
                         let bits_to_read = if width <= max_width {
                             sent_bits as i32

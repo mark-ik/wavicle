@@ -71,12 +71,18 @@ impl fmt::Display for Error {
             }
             Self::NotYetImplemented(what) => write!(f, "not yet implemented: {what}"),
             Self::CrcMismatch { stored, computed } => {
-                write!(f, "block CRC mismatch: stored {stored:#010x}, computed {computed:#010x}")
+                write!(
+                    f,
+                    "block CRC mismatch: stored {stored:#010x}, computed {computed:#010x}"
+                )
             }
             Self::OverMagnitude => f.write_str("decoded sample exceeds stated magnitude"),
             Self::MissingSubBlock(what) => write!(f, "audio block missing {what}"),
             Self::NonContiguousBlock { expected, found } => {
-                write!(f, "non-contiguous block: expected frame {expected}, found {found}")
+                write!(
+                    f,
+                    "non-contiguous block: expected frame {expected}, found {found}"
+                )
             }
         }
     }

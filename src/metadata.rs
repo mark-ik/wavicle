@@ -54,9 +54,7 @@ impl<'a> Iterator for SubBlocks<'a> {
             return Some(Err(Error::BadSubBlock { id }));
         }
         let words = if large {
-            u32::from(self.rest[1])
-                | u32::from(self.rest[2]) << 8
-                | u32::from(self.rest[3]) << 16
+            u32::from(self.rest[1]) | u32::from(self.rest[2]) << 8 | u32::from(self.rest[3]) << 16
         } else {
             u32::from(self.rest[1])
         };

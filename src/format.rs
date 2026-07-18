@@ -20,8 +20,8 @@ pub const MAX_BLOCK_SAMPLES: u32 = 131072;
 /// Standard sample-rate table indexed by header bits 23..=26. Index 15 means
 /// the true rate rides in an [`meta::SAMPLE_RATE`] sub-block instead.
 pub const SAMPLE_RATES: [u32; 15] = [
-    6000, 8000, 9600, 11025, 12000, 16000, 22050, 24000, 32000, 44100, 48000, 64000, 88200,
-    96000, 192000,
+    6000, 8000, 9600, 11025, 12000, 16000, 22050, 24000, 32000, 44100, 48000, 64000, 88200, 96000,
+    192000,
 ];
 
 /// The header `flags` word, with typed accessors instead of scattered masks.

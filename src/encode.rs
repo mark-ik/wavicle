@@ -9,12 +9,12 @@
 //! improvement that does not change the format the decoder reads.
 
 use crate::bitstream::BitWriter;
+use crate::block;
 use crate::decorr::{DecorrPass, forward_decorr_mono_pass, forward_decorr_stereo_pass};
 use crate::entropy::WordsEncoder;
 use crate::error::{Error, Scope};
 use crate::float::{scan_float_data, send_float_data};
 use crate::format::{self, Flags, meta};
-use crate::block;
 
 /// The fixed decorrelation cascade this encoder stamps, in forward order
 /// `(term, delta)`. A short cascade of an extrapolating predictor (18), a
@@ -47,9 +47,12 @@ pub struct EncodeParams {
 /// `samples` holds sign-extended `i32` values (`channels * frames` of them),
 /// each fitting in `bits_per_sample`.
 pub fn encode_int(params: EncodeParams, samples: &[i32]) -> Result<Vec<u8>, Error> {
-    let (mono, total_frames, srate_index) = prepare(params.channels, params.sample_rate, samples.len())?;
+    let (mono, total_frames, srate_index) =
+        prepare(params.channels, params.sample_rate, samples.len())?;
     if !matches!(params.bits_per_sample, 8 | 16 | 24 | 32) {
-        return Err(Error::NotYetImplemented("bit depth must be 8, 16, 24, or 32"));
+        return Err(Error::NotYetImplemented(
+            "bit depth must be 8, 16, 24, or 32",
+        ));
     }
     let bytes_per_sample = params.bits_per_sample / 8;
     let channels = params.channels as usize;
@@ -61,8 +64,16 @@ pub fn encode_int(params: EncodeParams, samples: &[i32]) -> Result<Vec<u8>, Erro
         let magnitude = magnitude_of(chunk)?;
         let flags = base_flags(mono, bytes_per_sample, magnitude, srate_index);
         assemble_block(
-            &mut out, mono, flags, params.sample_rate, chunk, block_index, block_frames,
-            total_frames, None, None,
+            &mut out,
+            mono,
+            flags,
+            params.sample_rate,
+            chunk,
+            block_index,
+            block_frames,
+            total_frames,
+            None,
+            None,
         );
         block_index += u64::from(block_frames);
     }
@@ -126,7 +137,7 @@ fn prepare(channels: u32, sample_rate: u32, len: usize) -> Result<(bool, u64, u3
     if sample_rate == 0 || sample_rate >= (1 << 24) {
         return Err(Error::NotYetImplemented("sample rate out of range"));
     }
-    if len % channels as usize != 0 {
+    if !len.is_multiple_of(channels as usize) {
         return Err(Error::Truncated {
             need: channels as usize,
             have: len,
@@ -142,7 +153,11 @@ fn magnitude_of(samples: &[i32]) -> Result<u32, Error> {
     let acc = samples
         .iter()
         .fold(0u32, |a, &s| a | if s < 0 { !s as u32 } else { s as u32 });
-    let magnitude = if acc == 0 { 0 } else { 32 - acc.leading_zeros() };
+    let magnitude = if acc == 0 {
+        0
+    } else {
+        32 - acc.leading_zeros()
+    };
     if magnitude > 31 {
         return Err(Error::OverMagnitude);
     }
@@ -231,7 +246,11 @@ fn assemble_block(
     push_sub_block(&mut m, meta::DECORR_TERMS, &term_bytes);
     push_sub_block(&mut m, meta::DECORR_WEIGHTS, &[]);
     push_sub_block(&mut m, meta::DECORR_SAMPLES, &[]);
-    push_sub_block(&mut m, meta::ENTROPY_VARS, &WordsEncoder::entropy_vars(mono));
+    push_sub_block(
+        &mut m,
+        meta::ENTROPY_VARS,
+        &WordsEncoder::entropy_vars(mono),
+    );
     if let Some(info) = float_info {
         push_sub_block(&mut m, meta::FLOAT_INFO, &info);
     }
@@ -239,7 +258,11 @@ fn assemble_block(
     // per block so each independent block is self-describing.
     if (flags >> 23) & 0xf == 0xf {
         let r = sample_rate;
-        push_sub_block(&mut m, meta::SAMPLE_RATE, &[r as u8, (r >> 8) as u8, (r >> 16) as u8]);
+        push_sub_block(
+            &mut m,
+            meta::SAMPLE_RATE,
+            &[r as u8, (r >> 8) as u8, (r >> 16) as u8],
+        );
     }
     push_wv_sub_block(&mut m, &wv);
     if let Some((crc_x, xbits)) = wvx {
@@ -248,7 +271,15 @@ fn assemble_block(
 
     let ck_size = (block::HEADER_LEN - 8 + m.len()) as u32;
     out.reserve(block::HEADER_LEN + m.len());
-    write_header(out, ck_size, block_index, block_frames, total_frames, flags, crc);
+    write_header(
+        out,
+        ck_size,
+        block_index,
+        block_frames,
+        total_frames,
+        flags,
+        crc,
+    );
     out.extend_from_slice(&m);
 }
 
@@ -291,7 +322,7 @@ fn push_sub_block(out: &mut Vec<u8>, id: u8, data: &[u8]) {
 
 /// The `ID_WV_BITSTREAM` sub-block, always in the large (3-byte size) form.
 fn push_wv_sub_block(out: &mut Vec<u8>, wv: &[u8]) {
-    debug_assert!(wv.len() % 2 == 0);
+    debug_assert!(wv.len().is_multiple_of(2));
     let words = (wv.len() / 2) as u32;
     out.push(meta::WV_BITSTREAM | meta::LARGE);
     out.push(words as u8);
@@ -304,7 +335,7 @@ fn push_wv_sub_block(out: &mut Vec<u8>, wv: &[u8]) {
 /// prefix, then the residual bitstream. This is the form the reference uses for
 /// all float data.
 fn push_wvx_sub_block(out: &mut Vec<u8>, crc_x: u32, xbits: &[u8]) {
-    debug_assert!(xbits.len() % 2 == 0);
+    debug_assert!(xbits.len().is_multiple_of(2));
     let words = ((4 + xbits.len()) / 2) as u32;
     out.push(meta::WVX_BITSTREAM | meta::LARGE);
     out.push(words as u8);

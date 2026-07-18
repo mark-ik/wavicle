@@ -295,7 +295,10 @@ pub fn scan_float_data(values: &[u32]) -> FloatScan {
         } else if exp != 0 {
             (0x800000 + get_mantissa(dp) as i32, max_exp - exp as i32)
         } else {
-            (get_mantissa(dp) as i32, if max_exp != 0 { max_exp - 1 } else { 0 })
+            (
+                get_mantissa(dp) as i32,
+                if max_exp != 0 { max_exp - 1 } else { 0 },
+            )
         };
 
         if shift_count < 25 {
@@ -342,7 +345,11 @@ pub fn scan_float_data(values: &[u32]) -> FloatScan {
         }
     }
 
-    let magnitude = if ordata == 0 { 0 } else { 32 - ordata.leading_zeros() };
+    let magnitude = if ordata == 0 {
+        0
+    } else {
+        32 - ordata.leading_zeros()
+    };
 
     if false_zeros != 0 || neg_zeros != 0 {
         flags |= FLOAT_ZEROS_SENT;
@@ -351,9 +358,8 @@ pub fn scan_float_data(values: &[u32]) -> FloatScan {
         flags |= FLOAT_NEG_ZEROS;
     }
 
-    let needs_wvx = flags
-        & (FLOAT_EXCEPTIONS | FLOAT_ZEROS_SENT | FLOAT_SHIFT_SENT | FLOAT_SHIFT_SAME)
-        != 0;
+    let needs_wvx =
+        flags & (FLOAT_EXCEPTIONS | FLOAT_ZEROS_SENT | FLOAT_SHIFT_SENT | FLOAT_SHIFT_SAME) != 0;
 
     FloatScan {
         ints,
@@ -370,7 +376,12 @@ pub fn scan_float_data(values: &[u32]) -> FloatScan {
 /// in [`float_values`]. Ported from `pack_floats.c` `send_float_data`. Must be
 /// given the original float patterns and the flags from [`scan_float_data`].
 #[cfg(feature = "encode")]
-pub fn send_float_data(values: &[u32], flags: u8, max_exp: u8, bw: &mut crate::bitstream::BitWriter) {
+pub fn send_float_data(
+    values: &[u32],
+    flags: u8,
+    max_exp: u8,
+    bw: &mut crate::bitstream::BitWriter,
+) {
     let max_exp = i32::from(max_exp);
     for &dp in values {
         let exp = get_exponent(dp);
@@ -385,7 +396,10 @@ pub fn send_float_data(values: &[u32], flags: u8, max_exp: u8, bw: &mut crate::b
         } else if exp != 0 {
             (0x800000 + get_mantissa(dp) as i32, max_exp - exp as i32)
         } else {
-            (get_mantissa(dp) as i32, if max_exp != 0 { max_exp - 1 } else { 0 })
+            (
+                get_mantissa(dp) as i32,
+                if max_exp != 0 { max_exp - 1 } else { 0 },
+            )
         };
 
         if shift_count < 25 {

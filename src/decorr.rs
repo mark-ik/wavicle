@@ -190,7 +190,10 @@ pub fn forward_decorr_mono_pass(dpp: &mut DecorrPass, buffer: &mut [i32]) {
                 2i32.wrapping_mul(dpp.samples_a[0])
                     .wrapping_sub(dpp.samples_a[1])
             } else {
-                (3i32.wrapping_mul(dpp.samples_a[0]).wrapping_sub(dpp.samples_a[1])) >> 1
+                (3i32
+                    .wrapping_mul(dpp.samples_a[0])
+                    .wrapping_sub(dpp.samples_a[1]))
+                    >> 1
             };
             dpp.samples_a[1] = dpp.samples_a[0];
             dpp.samples_a[0] = orig;
