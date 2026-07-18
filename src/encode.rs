@@ -57,7 +57,8 @@ pub fn encode_int(params: EncodeParams, samples: &[i32]) -> Result<Vec<u8>, Erro
         let magnitude = magnitude_of(chunk)?;
         let flags = base_flags(mono, bytes_per_sample, magnitude, srate_index);
         assemble_block(
-            &mut out, mono, flags, chunk, block_index, block_frames, total_frames, None, None,
+            &mut out, mono, flags, params.sample_rate, chunk, block_index, block_frames,
+            total_frames, None, None,
         );
         block_index += u64::from(block_frames);
     }
@@ -93,6 +94,7 @@ pub fn encode_float(channels: u32, sample_rate: u32, samples: &[f32]) -> Result<
             &mut out,
             mono,
             flags,
+            sample_rate,
             &scan.ints,
             block_index,
             block_frames,
@@ -110,10 +112,16 @@ fn prepare(channels: u32, sample_rate: u32, len: usize) -> Result<(bool, u64, u3
     if channels != 1 && channels != 2 {
         return Err(Error::OutOfScope(Scope::MoreThanTwoChannels));
     }
+    // A standard rate goes in the header index; anything else uses index 0xF
+    // and an ID_SAMPLE_RATE sub-block, so any capture rate round-trips.
     let srate_index = format::SAMPLE_RATES
         .iter()
         .position(|&r| r == sample_rate)
-        .ok_or(Error::NotYetImplemented("non-standard sample rate"))? as u32;
+        .map(|i| i as u32)
+        .unwrap_or(0xF);
+    if sample_rate == 0 || sample_rate >= (1 << 24) {
+        return Err(Error::NotYetImplemented("sample rate out of range"));
+    }
     if len % channels as usize != 0 {
         return Err(Error::Truncated {
             need: channels as usize,
@@ -156,6 +164,7 @@ fn assemble_block(
     out: &mut Vec<u8>,
     mono: bool,
     flags: u32,
+    sample_rate: u32,
     ints: &[i32],
     block_index: u64,
     block_frames: u32,
@@ -211,6 +220,12 @@ fn assemble_block(
     push_sub_block(&mut m, meta::ENTROPY_VARS, &WordsEncoder::entropy_vars(mono));
     if let Some(info) = float_info {
         push_sub_block(&mut m, meta::FLOAT_INFO, &info);
+    }
+    // Non-standard rate (header index 0xF): carry the true rate here. Emitted
+    // per block so each independent block is self-describing.
+    if (flags >> 23) & 0xf == 0xf {
+        let r = sample_rate;
+        push_sub_block(&mut m, meta::SAMPLE_RATE, &[r as u8, (r >> 8) as u8, (r >> 16) as u8]);
     }
     push_wv_sub_block(&mut m, &wv);
     if let Some((crc_x, xbits)) = wvx {

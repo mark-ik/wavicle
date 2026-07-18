@@ -515,6 +515,42 @@ fn long_inputs_split_into_blocks_and_round_trip() {
     }
 }
 
+/// A non-standard sample rate must round-trip via the ID_SAMPLE_RATE sub-block
+/// (header index 0xF), so wavicle is a drop-in for any capture rate.
+#[cfg(feature = "encode")]
+#[test]
+fn non_standard_sample_rate_round_trips() {
+    use wavicle::{EncodeParams, encode_float, encode_int};
+
+    let rate = 37_800; // a real but non-table rate (old CD-ROM-XA)
+    let ints: Vec<i32> = (0..2000).map(|i| ((3000.0 * (i as f64 * 0.03).sin()) as i32)).collect();
+    let wv = encode_int(EncodeParams { channels: 1, sample_rate: rate, bits_per_sample: 16 }, &ints).unwrap();
+    let d = wavicle::decode_stream(&wv).unwrap();
+    assert_eq!(d.sample_rate, rate, "int: custom rate must survive");
+    assert_eq!(d.samples, ints);
+
+    let floats: Vec<f32> = (0..2000).map(|i| (0.5 * (i as f64 * 0.03).sin()) as f32).collect();
+    let wv = encode_float(1, rate, &floats).unwrap();
+    let d = wavicle::decode_stream(&wv).unwrap();
+    assert_eq!(d.sample_rate, rate, "float: custom rate must survive");
+    let got: Vec<u32> = d.samples.iter().map(|&s| s as u32).collect();
+    let want: Vec<u32> = floats.iter().map(|f| f.to_bits()).collect();
+    assert_eq!(got, want);
+
+    // And the reference agrees on the rate.
+    let tool = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../testing/wavicle/tools/wvunpack.exe");
+    if tool.exists() {
+        let dir = std::env::temp_dir();
+        let p = dir.join("wavicle_rate.wv");
+        std::fs::write(&p, &wv).unwrap();
+        let out = std::process::Command::new(&tool).args(["-ss"]).arg(&p).output().unwrap();
+        let ss = String::from_utf8_lossy(&out.stdout);
+        assert!(ss.contains("37800"), "wvunpack -ss should report 37800 Hz:\n{ss}");
+        let _ = std::fs::remove_file(&p);
+    }
+}
+
 /// A corrupted payload must fail with a CRC error, never decode silently.
 #[test]
 fn corrupt_audio_fails_the_crc_hard() {

@@ -49,10 +49,11 @@ pub fn decode_stream(stream: &[u8]) -> Result<DecodedStream, Error> {
         }
 
         let samples = decode_block(&block)?;
-        let rate = h
-            .flags
-            .sample_rate()
-            .ok_or(Error::NotYetImplemented("non-standard sample rate"))?;
+        let rate = match h.flags.sample_rate() {
+            Some(r) => r,
+            None => custom_sample_rate(&block)
+                .ok_or(Error::MissingSubBlock("sample rate for non-standard index"))?,
+        };
 
         match &mut out {
             None => {
@@ -69,6 +70,21 @@ pub fn decode_stream(stream: &[u8]) -> Result<DecodedStream, Error> {
     }
 
     out.ok_or(Error::Truncated { need: 32, have: 0 })
+}
+
+/// The true sample rate from a block's `ID_SAMPLE_RATE` sub-block (3-byte LE),
+/// used when the header rate index is the non-standard marker (0xF).
+fn custom_sample_rate(block: &crate::block::Block<'_>) -> Option<u32> {
+    for sub in block.sub_blocks().flatten() {
+        if sub.id == meta::SAMPLE_RATE && sub.data.len() >= 3 {
+            return Some(
+                u32::from(sub.data[0])
+                    | u32::from(sub.data[1]) << 8
+                    | u32::from(sub.data[2]) << 16,
+            );
+        }
+    }
+    None
 }
 
 /// Decode one audio block to its output samples (already un-joint-stereoed,
