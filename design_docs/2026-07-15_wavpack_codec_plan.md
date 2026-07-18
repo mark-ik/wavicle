@@ -490,3 +490,25 @@ that step:
   exactly. Default features stay `decode` until the encoder is complete (float
   at M5). Next: M5, float encode (`pack_floats.c`: the scan/align + wvx
   residual), the last milestone before Hocket integration.
+- 2026-07-15: **M5 LANDED — bit-exact float encode. wavicle is now a complete
+  round-trip WavPack codec for the tiny profile.** Ported `scan_float_data`
+  (converts IEEE floats to the integer mantissas WavPack compresses, computes
+  the wvx `crc_x`, and picks the shift/zeros flags) and `send_float_data`
+  (writes the residual bits over the saved-original floats) from
+  `pack_floats.c`, plus the classic `0x0c` wvx sub-block with its 4-byte crc
+  prefix (the reference uses classic, not the new form, for all float data).
+  The driver saves the original float patterns before the scan converts them,
+  computes the block CRC over the mantissa integers, and emits float_info + wv
+  + wvx in the reference order. Refactored encode into a shared `assemble_block`
+  used by both int and float. Gate green: four float cases (mono, stereo,
+  silence, and an adversarial specials buffer with signed zero, smallest/
+  largest denormals, +/-inf, quiet and signaling NaN with payloads, max normal)
+  each round-trip bit-exact through our own decoder, the reference
+  `wvunpack -r`, AND a BLAKE3 identity check over the decoded f32 bytes. Full
+  matrix builds (decode-only, encode-only, both, wasm). **The codec is
+  round-trip complete**: encode and decode, 16/24/32-bit int and 32-bit float,
+  mono/stereo, all lossless and oracle-verified. Remaining before shipping to
+  Hocket: multi-block encode (files over 131072 frames), then M6 integration
+  (project_store media .wav -> .wv). Decorrelation is still a single fixed term,
+  so files are larger than the reference's; a format-compatible compression
+  follow-on, not a correctness gap.

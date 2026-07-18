@@ -1,24 +1,24 @@
-//! The integer encode driver (M4).
+//! The encode driver (M4 integer, M5 float).
 //!
 //! Shaped after `pack_samples` in the reference `pack.c` (dbry/WavPack,
-//! BSD-3-Clause; see ATTRIBUTION.md), narrowed to the one configuration this
-//! milestone ships: a single block, no decorrelation, no joint stereo, no
-//! extended-integer packing. Residuals equal the input samples, so the entropy
-//! coder is exercised directly. Byte-identity with the reference encoder is a
-//! non-goal (see the founding plan); the gate is that the reference `wvunpack`
-//! decodes our output losslessly. Decorrelation (smaller files) is a later
-//! addition that does not change the format the decoder reads.
+//! BSD-3-Clause; see ATTRIBUTION.md), narrowed to the configuration this
+//! project ships: a single block, one fixed decorrelation term, no joint
+//! stereo. Byte-identity with the reference encoder is a non-goal (see the
+//! founding plan); the gate is that the reference `wvunpack` decodes our
+//! output losslessly. More/better decorrelation terms are a later compression
+//! improvement that does not change the format the decoder reads.
 
 use crate::bitstream::BitWriter;
 use crate::decorr::{DecorrPass, forward_decorr_mono_pass, forward_decorr_stereo_pass};
 use crate::entropy::WordsEncoder;
-use crate::error::Error;
+use crate::error::{Error, Scope};
+use crate::float::{scan_float_data, send_float_data};
 use crate::format::{self, Flags, meta};
+use crate::block;
 
-/// The fixed decorrelation this milestone stamps: a single term-2 pass. A
-/// conforming decoder reads whatever config we write, so this is a valid
-/// lossless choice; more/better terms are a later compression improvement that
-/// does not change the stream format. Delta 2 is a common adaptation rate.
+/// The fixed decorrelation this milestone stamps: a single term-2 pass. Delta 2
+/// is a common adaptation rate. A conforming decoder reads whatever config we
+/// write, so this is a valid lossless choice.
 const FIXED_TERM: i32 = 2;
 const FIXED_DELTA: i32 = 2;
 
@@ -34,63 +34,123 @@ pub struct EncodeParams {
 
 /// Encode interleaved integer `samples` to a single-block `.wv` stream.
 ///
-/// `samples` holds sign-extended `i32` values (`channels * frames` of them).
-/// Each must fit in `bits_per_sample`.
+/// `samples` holds sign-extended `i32` values (`channels * frames` of them),
+/// each fitting in `bits_per_sample`.
 pub fn encode_int(params: EncodeParams, samples: &[i32]) -> Result<Vec<u8>, Error> {
-    let EncodeParams {
-        channels,
-        sample_rate,
-        bits_per_sample,
-    } = params;
-
-    if channels != 1 && channels != 2 {
-        return Err(Error::OutOfScope(crate::error::Scope::MoreThanTwoChannels));
-    }
-    if !matches!(bits_per_sample, 8 | 16 | 24 | 32) {
+    let (mono, frames, srate_index) = prepare(params.channels, params.sample_rate, samples.len())?;
+    if !matches!(params.bits_per_sample, 8 | 16 | 24 | 32) {
         return Err(Error::NotYetImplemented("bit depth must be 8, 16, 24, or 32"));
+    }
+    let bytes_per_sample = params.bits_per_sample / 8;
+    let magnitude = magnitude_of(samples)?;
+
+    let flags = base_flags(mono, bytes_per_sample, magnitude, srate_index);
+    Ok(assemble_block(mono, flags, samples, frames, None, None))
+}
+
+/// Encode interleaved 32-bit float `samples` (`channels * frames`) to a
+/// single-block `.wv` stream, bit-exact and losslessly.
+pub fn encode_float(channels: u32, sample_rate: u32, samples: &[f32]) -> Result<Vec<u8>, Error> {
+    let (mono, frames, srate_index) = prepare(channels, sample_rate, samples.len())?;
+
+    let bits: Vec<u32> = samples.iter().map(|f| f.to_bits()).collect();
+    let scan = scan_float_data(&bits);
+    if scan.magnitude > 31 {
+        return Err(Error::OverMagnitude);
+    }
+
+    let mut flags = base_flags(mono, 4, scan.magnitude, srate_index);
+    flags |= Flags::FLOAT_DATA;
+
+    let float_info = [scan.flags, scan.shift, scan.max_exp, 127];
+
+    let wvx = if scan.needs_wvx {
+        let mut bw = BitWriter::new();
+        send_float_data(&bits, scan.flags, scan.max_exp, &mut bw);
+        Some((scan.crc_x, bw.close()))
+    } else {
+        None
+    };
+
+    Ok(assemble_block(
+        mono,
+        flags,
+        &scan.ints,
+        frames,
+        Some(float_info),
+        wvx.as_ref().map(|(c, b)| (*c, b.as_slice())),
+    ))
+}
+
+/// Validate channel/rate/length and return `(mono, frames, srate_index)`.
+fn prepare(channels: u32, sample_rate: u32, len: usize) -> Result<(bool, u32, u32), Error> {
+    if channels != 1 && channels != 2 {
+        return Err(Error::OutOfScope(Scope::MoreThanTwoChannels));
     }
     let srate_index = format::SAMPLE_RATES
         .iter()
         .position(|&r| r == sample_rate)
-        .ok_or(Error::NotYetImplemented("non-standard sample rate"))?
-        as u32;
-
-    let mono = channels == 1;
-    if samples.len() % channels as usize != 0 {
+        .ok_or(Error::NotYetImplemented("non-standard sample rate"))? as u32;
+    if len % channels as usize != 0 {
         return Err(Error::Truncated {
             need: channels as usize,
-            have: samples.len(),
+            have: len,
         });
     }
-    let frames = (samples.len() / channels as usize) as u32;
+    let frames = (len / channels as usize) as u32;
     if frames > format::MAX_BLOCK_SAMPLES {
         return Err(Error::NotYetImplemented(
             "multi-block encode (over 131072 frames)",
         ));
     }
+    Ok((channels == 1, frames, srate_index))
+}
 
-    let bytes_per_sample = bits_per_sample / 8;
-    // The magnitude field is the actual max, computed like the reference (the
-    // OR of every sample folded through its own sign), not the nominal bit
-    // depth. This keeps the decoder's mute limit correct and avoids a 1<<31
-    // overflow at 32-bit.
-    let mag_acc = samples
+/// The actual max magnitude of integer data, like the reference (the OR of
+/// every sample folded through its own sign). Avoids a 1<<31 mute-limit
+/// overflow at 32-bit that a nominal `bits-1` would cause.
+fn magnitude_of(samples: &[i32]) -> Result<u32, Error> {
+    let acc = samples
         .iter()
-        .fold(0u32, |acc, &s| acc | if s < 0 { !s as u32 } else { s as u32 });
-    let magnitude = if mag_acc == 0 { 0 } else { 32 - mag_acc.leading_zeros() };
+        .fold(0u32, |a, &s| a | if s < 0 { !s as u32 } else { s as u32 });
+    let magnitude = if acc == 0 { 0 } else { 32 - acc.leading_zeros() };
     if magnitude > 31 {
         return Err(Error::OverMagnitude);
     }
+    Ok(magnitude)
+}
 
-    // CRC over the original samples, exactly as the reference and our decoder
-    // compute it (seed 0xffffffff; mono crc*3+s, stereo crc*9 + 3*L + R).
+fn base_flags(mono: bool, bytes_per_sample: u32, magnitude: u32, srate_index: u32) -> u32 {
+    let mut flags = bytes_per_sample - 1;
+    if mono {
+        flags |= 1 << 2; // MONO_FLAG
+    }
+    flags |= Flags::INITIAL_BLOCK | Flags::FINAL_BLOCK;
+    flags |= magnitude << 18;
+    flags |= srate_index << 23;
+    flags
+}
+
+/// Compute the block CRC over `ints`, forward-decorrelate a copy with the fixed
+/// term, entropy-encode the residuals, and assemble the block with its metadata
+/// (optionally including float info and a wvx sub-block).
+fn assemble_block(
+    mono: bool,
+    flags: u32,
+    ints: &[i32],
+    frames: u32,
+    float_info: Option<[u8; 4]>,
+    wvx: Option<(u32, &[u8])>,
+) -> Vec<u8> {
+    // Block CRC over the integers (== decoder's CRC over the reconstructed
+    // integers before any float expansion): seed 0xffffffff.
     let mut crc: u32 = 0xffffffff;
     if mono {
-        for &s in samples {
+        for &s in ints {
             crc = crc.wrapping_add(crc << 1).wrapping_add(s as u32);
         }
     } else {
-        for f in samples.chunks_exact(2) {
+        for f in ints.chunks_exact(2) {
             crc = crc
                 .wrapping_add(crc << 3)
                 .wrapping_add((f[0] as u32) << 1)
@@ -99,10 +159,8 @@ pub fn encode_int(params: EncodeParams, samples: &[i32]) -> Result<Vec<u8>, Erro
         }
     }
 
-    // Forward-decorrelate a working copy with the fixed term (weights and
-    // history start at zero, which is what the decorr metadata records), then
-    // entropy-encode the residuals.
-    let mut residuals = samples.to_vec();
+    // Forward-decorrelate a working copy (weights and history start at zero).
+    let mut residuals = ints.to_vec();
     let mut pass = DecorrPass {
         term: FIXED_TERM,
         delta: FIXED_DELTA,
@@ -120,37 +178,30 @@ pub fn encode_int(params: EncodeParams, samples: &[i32]) -> Result<Vec<u8>, Erro
     words.finish(&mut bw);
     let wv = bw.close();
 
-    // Header flags.
-    let mut flags: u32 = bytes_per_sample - 1;
-    if mono {
-        flags |= 1 << 2; // MONO_FLAG
-    }
-    flags |= Flags::INITIAL_BLOCK | Flags::FINAL_BLOCK;
-    flags |= magnitude << 18;
-    flags |= srate_index << 23;
-
-    // Decorrelation metadata for the single fixed term, all-zero starting
-    // state (one term byte; zero weights; `term` zero history entries).
+    // Metadata in the reference's order.
     let term_byte = (((FIXED_TERM + 5) as u8) & 0x1f) | ((FIXED_DELTA as u8) << 5);
     let weights_len = if mono { 1 } else { 2 };
     let samples_len = FIXED_TERM as usize * if mono { 2 } else { 4 };
 
-    // Assemble metadata, then the header (whose ckSize we fill in last).
-    let mut meta_bytes = Vec::new();
-    push_sub_block(&mut meta_bytes, meta::DECORR_TERMS, &[term_byte]);
-    push_sub_block(&mut meta_bytes, meta::DECORR_WEIGHTS, &vec![0u8; weights_len]);
-    push_sub_block(&mut meta_bytes, meta::DECORR_SAMPLES, &vec![0u8; samples_len]);
-    push_sub_block(&mut meta_bytes, meta::ENTROPY_VARS, &WordsEncoder::entropy_vars(mono));
-    push_wv_sub_block(&mut meta_bytes, &wv);
+    let mut m = Vec::new();
+    push_sub_block(&mut m, meta::DECORR_TERMS, &[term_byte]);
+    push_sub_block(&mut m, meta::DECORR_WEIGHTS, &vec![0u8; weights_len]);
+    push_sub_block(&mut m, meta::DECORR_SAMPLES, &vec![0u8; samples_len]);
+    push_sub_block(&mut m, meta::ENTROPY_VARS, &WordsEncoder::entropy_vars(mono));
+    if let Some(info) = float_info {
+        push_sub_block(&mut m, meta::FLOAT_INFO, &info);
+    }
+    push_wv_sub_block(&mut m, &wv);
+    if let Some((crc_x, xbits)) = wvx {
+        push_wvx_sub_block(&mut m, crc_x, xbits);
+    }
 
-    let ck_size = (block::HEADER_LEN - 8 + meta_bytes.len()) as u32;
-    let mut out = Vec::with_capacity(block::HEADER_LEN + meta_bytes.len());
+    let ck_size = (block::HEADER_LEN - 8 + m.len()) as u32;
+    let mut out = Vec::with_capacity(block::HEADER_LEN + m.len());
     write_header(&mut out, ck_size, frames, flags, crc);
-    out.extend_from_slice(&meta_bytes);
-    Ok(out)
+    out.extend_from_slice(&m);
+    out
 }
-
-use crate::block;
 
 fn write_header(out: &mut Vec<u8>, ck_size: u32, frames: u32, flags: u32, crc: u32) {
     out.extend_from_slice(&format::MAGIC);
@@ -166,7 +217,7 @@ fn write_header(out: &mut Vec<u8>, ck_size: u32, frames: u32, flags: u32, crc: u
 }
 
 /// Append a small metadata sub-block (up to 510 data bytes). Odd-length data
-/// sets the ODD_SIZE flag and is padded with one byte, as the decoder expects.
+/// sets ODD_SIZE and is padded with one byte, as the decoder expects.
 fn push_sub_block(out: &mut Vec<u8>, id: u8, data: &[u8]) {
     let odd = data.len() % 2 == 1;
     let words = data.len().div_ceil(2);
@@ -179,8 +230,7 @@ fn push_sub_block(out: &mut Vec<u8>, id: u8, data: &[u8]) {
     }
 }
 
-/// Append the `ID_WV_BITSTREAM` sub-block, always in the large (3-byte size)
-/// form as the reference does. The payload is even by construction.
+/// The `ID_WV_BITSTREAM` sub-block, always in the large (3-byte size) form.
 fn push_wv_sub_block(out: &mut Vec<u8>, wv: &[u8]) {
     debug_assert!(wv.len() % 2 == 0);
     let words = (wv.len() / 2) as u32;
@@ -189,4 +239,18 @@ fn push_wv_sub_block(out: &mut Vec<u8>, wv: &[u8]) {
     out.push((words >> 8) as u8);
     out.push((words >> 16) as u8);
     out.extend_from_slice(wv);
+}
+
+/// The `ID_WVX_BITSTREAM` (classic form) sub-block: a 4-byte little-endian CRC
+/// prefix, then the residual bitstream. This is the form the reference uses for
+/// all float data.
+fn push_wvx_sub_block(out: &mut Vec<u8>, crc_x: u32, xbits: &[u8]) {
+    debug_assert!(xbits.len() % 2 == 0);
+    let words = ((4 + xbits.len()) / 2) as u32;
+    out.push(meta::WVX_BITSTREAM | meta::LARGE);
+    out.push(words as u8);
+    out.push((words >> 8) as u8);
+    out.push((words >> 16) as u8);
+    out.extend_from_slice(&crc_x.to_le_bytes());
+    out.extend_from_slice(xbits);
 }

@@ -360,6 +360,97 @@ fn encode_round_trips_losslessly_through_ourselves_and_the_reference() {
     }
 }
 
+/// M5 gate. Float encode must round-trip bit-exactly: our encode then our
+/// decode reproduces the exact f32 patterns, our encode then the reference
+/// `wvunpack -r` reproduces them, and the BLAKE3 of the decoded f32 bytes
+/// matches the input's (the media-identity invariant Hocket keys on). Includes
+/// the adversarial specials (signed zero, denormals, NaN payloads, infinities).
+#[cfg(feature = "encode")]
+#[test]
+fn float_encode_round_trips_bit_exact_with_blake3_identity() {
+    use wavicle::encode_float;
+
+    fn tone(n: usize, rate: u32, freq: f64, amp: f64) -> Vec<f32> {
+        (0..n)
+            .map(|i| (amp * (2.0 * std::f64::consts::PI * freq * i as f64 / rate as f64).sin()) as f32)
+            .collect()
+    }
+
+    let specials_bits: [u32; 16] = [
+        0x00000000, 0x80000000, 0x3F800000, 0xBF800000, 0x00000001, 0x80000001, 0x007FFFFF,
+        0x7F800000, 0xFF800000, 0x7FC00000, 0x7F800001, 0x7FFFFFFF, 0xFFC00000, 0x7F7FFFFF,
+        0x00800000, 0x3F000000,
+    ];
+    let mut specials = Vec::new();
+    for _ in 0..16 {
+        specials.extend(specials_bits.iter().map(|&b| f32::from_bits(b)));
+    }
+    specials.extend(tone(240, 48000, 55.0, 0.02));
+
+    struct Case { name: &'static str, channels: u32, rate: u32, samples: Vec<f32> }
+    let cases = vec![
+        Case { name: "f32 mono", channels: 1, rate: 48000, samples: tone(4000, 48000, 220.0, 0.6) },
+        Case {
+            name: "f32 stereo",
+            channels: 2,
+            rate: 48000,
+            samples: {
+                let l = tone(3000, 48000, 220.0, 0.6);
+                let r = tone(3000, 48000, 330.0, 0.5);
+                l.iter().zip(&r).flat_map(|(a, b)| [*a, *b]).collect()
+            },
+        },
+        Case { name: "f32 specials", channels: 1, rate: 48000, samples: specials },
+        Case { name: "f32 silence", channels: 2, rate: 44100, samples: vec![0.0; 4000] },
+    ];
+
+    let tool = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../testing/wavicle/tools/wvunpack.exe");
+    let have_ref = tool.exists();
+
+    for case in &cases {
+        let want_bits: Vec<u32> = case.samples.iter().map(|f| f.to_bits()).collect();
+        let wv = encode_float(case.channels, case.rate, &case.samples)
+            .unwrap_or_else(|e| panic!("{}: encode failed: {e}", case.name));
+
+        // Self round-trip: decode gives back the exact bit patterns.
+        let decoded = wavicle::decode_stream(&wv)
+            .unwrap_or_else(|e| panic!("{}: self-decode failed: {e}", case.name));
+        assert!(decoded.is_float, "{}: float flag", case.name);
+        let got_bits: Vec<u32> = decoded.samples.iter().map(|&s| s as u32).collect();
+        for (i, (a, b)) in got_bits.iter().zip(&want_bits).enumerate() {
+            assert_eq!(a, b, "{}: self round-trip sample {i}: {a:#010x} vs {b:#010x}", case.name);
+        }
+
+        // BLAKE3 identity over the decoded f32 LE bytes.
+        let want_bytes: Vec<u8> = want_bits.iter().flat_map(|b| b.to_le_bytes()).collect();
+        let got_bytes: Vec<u8> = got_bits.iter().flat_map(|b| b.to_le_bytes()).collect();
+        assert_eq!(blake3::hash(&got_bytes), blake3::hash(&want_bytes), "{}: BLAKE3", case.name);
+
+        // Reference round-trip.
+        if have_ref {
+            let dir = std::env::temp_dir();
+            let wv_path = dir.join(format!("wavicle_m5_{}.wv", case.name.replace(' ', "_")));
+            let raw_path = dir.join(format!("wavicle_m5_{}.raw", case.name.replace(' ', "_")));
+            std::fs::write(&wv_path, &wv).unwrap();
+            let status = std::process::Command::new(&tool)
+                .args(["-r", "-y", "-q"]).arg(&wv_path).arg("-o").arg(&raw_path)
+                .status().expect("run wvunpack");
+            assert!(status.success(), "{}: wvunpack rejected our float stream", case.name);
+            let raw = std::fs::read(&raw_path).unwrap();
+            let ref_bits: Vec<u32> = raw
+                .chunks_exact(4)
+                .map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+                .collect();
+            for (i, (a, b)) in ref_bits.iter().zip(&want_bits).enumerate() {
+                assert_eq!(a, b, "{}: reference sample {i}: {a:#010x} vs {b:#010x}", case.name);
+            }
+            let _ = std::fs::remove_file(&wv_path);
+            let _ = std::fs::remove_file(&raw_path);
+        }
+    }
+}
+
 /// A corrupted payload must fail with a CRC error, never decode silently.
 #[test]
 fn corrupt_audio_fails_the_crc_hard() {

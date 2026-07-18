@@ -19,13 +19,12 @@ the conformance oracle), read from copies kept outside this repo.
 | `bitstream` (writer) | `wavpack_local.h` putbit/putbits macros, `pack.c` bs_close_write | M4 |
 | `entropy` (encoder) | `write_words.c` send_words_lossless + flush_word, `write_words.c` write_entropy_vars | M4; lossless path only |
 | `decorr` (forward) | `pack.c` decorr_mono_buffer + decorr_stereo_pass (forward), inverse of the decode passes | M4; positive terms only |
-| `encode` driver | `pack.c` pack_samples (block assembly order, CRC over originals, metadata framing) | M4; single block, fixed one-term config |
+| `float` (encode) | `pack_floats.c` scan_float_data + send_float_data | M5; the encode mirror of float_values |
+| `encode` driver | `pack.c` pack_samples (block assembly order, CRC over originals, metadata framing, the wvx sub-block with its crc prefix) | M4+M5; single block, fixed one-term config |
 
-Planned lineage for later milestones:
-
-| Module | Reference lineage |
-|---|---|
-| `encode` float | `pack_floats.c` (float encode, wvx residual) |
+The codec is round-trip complete for the tiny profile. No further reference
+modules are required for it; remaining work (multi-block encode, decorrelation
+tuning) builds on the ports already listed.
 
 Deliberately NOT ported: `decorr_tables.h` (the encoder ships one fixed
 decorrelation configuration instead of the reference's table-driven search),
