@@ -9,17 +9,16 @@
 //! wasm-capable. Out of scope: DSD, hybrid/lossy modes, correction files,
 //! more than two channels, pre-4.0 legacy streams.
 //!
-//! **Status: M5 (round-trip codec complete for the tiny profile).** Both
+//! **Status: round-trip codec, verified against the reference.** Both
 //! directions, bit-exact and lossless: decode and encode of 16/24/32-bit
 //! integer and 32-bit float, mono and stereo. Verified against the reference
 //! `wvunpack`/`wavpack` over a corpus; float in both directions passes a
 //! BLAKE3 round-trip identity check over the decoded f32 bytes. Decode is the
 //! default build; [`encode_int`] and [`encode_float`] are behind the `encode`
-//! feature and use a single fixed decorrelation term (a valid lossless choice;
-//! smaller files via better decorrelation are a later, format-compatible
-//! improvement). Inputs of any length are supported: the encoder splits long
-//! data into independent blocks. The founding plan and conformance-oracle
-//! method live in the repository's `design_docs/`.
+//! feature and use a fixed multi-term decorrelation cascade (files land within
+//! a hair of the reference encoder's size). Inputs of any length are supported:
+//! the encoder splits long data into independent blocks. The founding plan and
+//! conformance-oracle method live in the repository's `design_docs/`.
 
 #![forbid(unsafe_code)]
 

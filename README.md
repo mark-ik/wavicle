@@ -8,11 +8,17 @@ ear, discrete bits on disk, one identity in both observations.
 
 ## Status
 
-**Name claim; implementation not started.** The founding plan lives in
-[design_docs/2026-07-15_wavpack_codec_plan.md](design_docs/2026-07-15_wavpack_codec_plan.md):
-scope, architecture, the decode-first milestone ladder, and the
-conformance-oracle method (every milestone is gated bit-for-bit against the
-reference `wvunpack`/`wavpack` CLI over a corpus).
+**Round-trip codec, verified against the reference.** Both directions are
+lossless and bit-exact: decode and encode of 16/24/32-bit integer and 32-bit
+float, mono and stereo, for inputs of any length (long data is split into
+independent blocks). Float survives a BLAKE3 identity check over the decoded
+bytes in both directions. Every milestone is gated bit-for-bit against the
+reference `wvunpack`/`wavpack` CLI over a corpus; the decoder is additionally
+fuzzed and never panics on hostile input. Decode is the default build; `encode`
+is an additive feature.
+
+The founding plan, milestone ladder, and conformance-oracle method live in
+[design_docs/2026-07-15_wavpack_codec_plan.md](design_docs/2026-07-15_wavpack_codec_plan.md).
 
 ## Scope
 
