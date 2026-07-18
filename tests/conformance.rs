@@ -551,6 +551,68 @@ fn non_standard_sample_rate_round_trips() {
     }
 }
 
+/// The fixed cascade should compress real-ish audio meaningfully below raw and
+/// within a reasonable factor of the reference's tuned encoder. This guards
+/// against a decorrelation regression that would silently balloon file sizes.
+#[cfg(feature = "encode")]
+#[test]
+fn encoded_size_is_reasonable_versus_raw_and_reference() {
+    use wavicle::encode_float;
+
+    let r = 48000u32;
+    let n = 24000usize;
+    // Deterministic representative audio: harmonics + light LCG noise + decay.
+    let mut lcg: u32 = 7;
+    let samples: Vec<f32> = (0..n)
+        .map(|i| {
+            let t = i as f64 / r as f64;
+            let mut s = 0.5 * (2.0 * std::f64::consts::PI * 220.0 * t).sin()
+                + 0.25 * (2.0 * std::f64::consts::PI * 440.0 * t).sin()
+                + 0.12 * (2.0 * std::f64::consts::PI * 660.0 * t).sin();
+            lcg = lcg.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            s += 0.02 * ((lcg >> 8) as f64 / (1u32 << 23) as f64 - 1.0);
+            let env = 0.3 + 0.7 * (1.0 - t / (n as f64 / r as f64)).max(0.0);
+            (s * env) as f32
+        })
+        .collect();
+
+    let raw_len = samples.len() * 4;
+    let wv = encode_float(1, r, &samples).unwrap();
+    // Must still be lossless.
+    let got: Vec<u32> = wavicle::decode_stream(&wv).unwrap().samples.iter().map(|&s| s as u32).collect();
+    let want: Vec<u32> = samples.iter().map(|f| f.to_bits()).collect();
+    assert_eq!(got, want, "size test must stay lossless");
+
+    // Beats raw comfortably.
+    assert!(wv.len() < raw_len * 9 / 10, "ours {} vs raw {}", wv.len(), raw_len);
+
+    let tool = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../testing/wavicle/tools/wavpack.exe");
+    if tool.exists() {
+        let dir = std::env::temp_dir();
+        let raw_path = dir.join("wavicle_size.raw");
+        let ref_wv = dir.join("wavicle_size_ref.wv");
+        let raw: Vec<u8> = samples.iter().flat_map(|f| f.to_le_bytes()).collect();
+        std::fs::write(&raw_path, &raw).unwrap();
+        std::process::Command::new(&tool)
+            .args([&format!("--raw-pcm={r},32f,1,le"), "-m", "-y", "-q"])
+            .arg(&raw_path).arg("-o").arg(&ref_wv)
+            .status().unwrap();
+        let ref_len = std::fs::metadata(&ref_wv).unwrap().len() as usize;
+        eprintln!(
+            "SIZE: raw {raw_len}  wavicle {}  reference {ref_len}  (ours/ref = {:.2}x, ours/raw = {:.0}%)",
+            wv.len(), wv.len() as f64 / ref_len as f64, wv.len() as f64 / raw_len as f64 * 100.0
+        );
+        assert!(
+            wv.len() < ref_len * 5 / 2,
+            "ours {} should be within 2.5x reference {}",
+            wv.len(), ref_len
+        );
+        let _ = std::fs::remove_file(&raw_path);
+        let _ = std::fs::remove_file(&ref_wv);
+    }
+}
+
 /// A corrupted payload must fail with a CRC error, never decode silently.
 #[test]
 fn corrupt_audio_fails_the_crc_hard() {

@@ -16,11 +16,15 @@ use crate::float::{scan_float_data, send_float_data};
 use crate::format::{self, Flags, meta};
 use crate::block;
 
-/// The fixed decorrelation this milestone stamps: a single term-2 pass. Delta 2
-/// is a common adaptation rate. A conforming decoder reads whatever config we
-/// write, so this is a valid lossless choice.
-const FIXED_TERM: i32 = 2;
-const FIXED_DELTA: i32 = 2;
+/// The fixed decorrelation cascade this encoder stamps, in forward order
+/// `(term, delta)`. A short cascade of an extrapolating predictor (18), a
+/// second-order term (2), a linear extrapolation (17), and the first two
+/// differences (1, 2) captures most of the redundancy in real audio without an
+/// adaptive per-file term search. A conforming decoder reads whatever config we
+/// write, so any valid set is lossless; this one just makes the files smaller
+/// than a single term. Weights and history start at zero (written as empty
+/// metadata), and each pass adapts within the block.
+const FIXED_DECORR: &[(i32, i32)] = &[(18, 2), (2, 2), (17, 2), (1, 2), (2, 2)];
 
 /// Frames per block. Well under the 131072-frame and 1 MB block limits even for
 /// worst-case incompressible stereo 32-bit data. Blocks are independent: each
@@ -189,17 +193,24 @@ fn assemble_block(
         }
     }
 
-    // Forward-decorrelate a working copy (weights and history start at zero).
+    // Forward-decorrelate a working copy through the fixed cascade, in order.
+    // Each pass starts with zero weights and history and adapts within the
+    // block. Applying passes one-at-a-time in forward order is equivalent to the
+    // reference's per-sample interleaving (each pass sees the same intermediate
+    // signal either way), and the decoder inverts them in reverse because the
+    // terms are stored reversed.
     let mut residuals = ints.to_vec();
-    let mut pass = DecorrPass {
-        term: FIXED_TERM,
-        delta: FIXED_DELTA,
-        ..DecorrPass::default()
-    };
-    if mono {
-        forward_decorr_mono_pass(&mut pass, &mut residuals);
-    } else {
-        forward_decorr_stereo_pass(&mut pass, &mut residuals);
+    for &(term, delta) in FIXED_DECORR {
+        let mut pass = DecorrPass {
+            term,
+            delta,
+            ..DecorrPass::default()
+        };
+        if mono {
+            forward_decorr_mono_pass(&mut pass, &mut residuals);
+        } else {
+            forward_decorr_stereo_pass(&mut pass, &mut residuals);
+        }
     }
 
     let mut words = WordsEncoder::new();
@@ -208,15 +219,18 @@ fn assemble_block(
     words.finish(&mut bw);
     let wv = bw.close();
 
-    // Metadata in the reference's order.
-    let term_byte = (((FIXED_TERM + 5) as u8) & 0x1f) | ((FIXED_DELTA as u8) << 5);
-    let weights_len = if mono { 1 } else { 2 };
-    let samples_len = FIXED_TERM as usize * if mono { 2 } else { 4 };
+    // Metadata in the reference's order. Terms in forward order; weights and
+    // history are empty sub-blocks, which the decoder reads as all-zero starting
+    // state (the same state the forward passes began from).
+    let term_bytes: Vec<u8> = FIXED_DECORR
+        .iter()
+        .map(|&(t, d)| (((t + 5) as u8) & 0x1f) | ((d as u8) << 5))
+        .collect();
 
     let mut m = Vec::new();
-    push_sub_block(&mut m, meta::DECORR_TERMS, &[term_byte]);
-    push_sub_block(&mut m, meta::DECORR_WEIGHTS, &vec![0u8; weights_len]);
-    push_sub_block(&mut m, meta::DECORR_SAMPLES, &vec![0u8; samples_len]);
+    push_sub_block(&mut m, meta::DECORR_TERMS, &term_bytes);
+    push_sub_block(&mut m, meta::DECORR_WEIGHTS, &[]);
+    push_sub_block(&mut m, meta::DECORR_SAMPLES, &[]);
     push_sub_block(&mut m, meta::ENTROPY_VARS, &WordsEncoder::entropy_vars(mono));
     if let Some(info) = float_info {
         push_sub_block(&mut m, meta::FLOAT_INFO, &info);
